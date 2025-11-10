@@ -112,6 +112,15 @@ class MemCacheUnit(abc.ABC):
 
         self._size += self._get_value_size(value)
 
+    @property
+    def internal_data(self):
+        return self.od
+
+    def update(self, data):
+        self._size -= sum(self._get_value_size(self.od[k]) for k in data if k in self.od)
+        self.od.update(data)
+        self._size += sum(self._get_value_size(v) for v in data.values())
+
     @abc.abstractmethod
     def _get_value_size(self, value):
         raise NotImplementedError
@@ -160,6 +169,8 @@ class MemCache:
         self.__calendar_mem_cache = klass(size_limit)
         self.__instrument_mem_cache = klass(size_limit)
         self.__feature_mem_cache = klass(size_limit)
+        self.__shared_feature_mem_cache = None
+        self.__cs_rlock_dict = None
 
     def __getitem__(self, key):
         if key == "c":
@@ -168,6 +179,10 @@ class MemCache:
             return self.__instrument_mem_cache
         elif key == "f":
             return self.__feature_mem_cache
+        elif key == "fs":
+            return self.__shared_feature_mem_cache
+        elif key == "cs_rlock_dict":
+            return self.__cs_rlock_dict
         else:
             raise KeyError("Unknown memcache unit")
 
@@ -176,6 +191,14 @@ class MemCache:
         self.__instrument_mem_cache.clear()
         self.__feature_mem_cache.clear()
 
+    def set_shared_cache(self, shared_cache):
+        self.__shared_feature_mem_cache = shared_cache
+    
+    def set_rlock_dict(self, rlock_dict):
+        self.__cs_rlock_dict = rlock_dict
+
+    def has_shared_cache(self):
+        return self.__shared_feature_mem_cache is not None
 
 class MemCacheExpire:
     CACHE_EXPIRE = C.mem_cache_expire

@@ -1520,6 +1520,85 @@ class Cov(PairRolling):
         super(Cov, self).__init__(feature_left, feature_right, N, "cov")
 
 
+
+#################### cross section operator ####################
+class XSectionOperator(ElemOperator):
+    producer_instrument = {}
+
+    def set_population(self, population):
+        super(XSectionOperator, self).set_population(population)
+        population_sorted = sorted(population)
+        if str(self) not in self.producer_instrument:
+            self.producer_instrument[str(self)] = population_sorted[
+                len(self.producer_instrument) % len(population_sorted)
+            ]
+
+    def _process_df(self, df, **_) -> pd.DataFrame:
+        raise NotImplementedError("This function must be implemented in your newly defined feature")
+        
+    def _load_internal(self, instrument, start_index, end_index, *args) -> pd.Series:
+        from .cache import H  # pylint: disable=C0415
+
+        cache_key = str(self), instrument, start_index, end_index, *args
+
+        if cache_key not in H["fs"]:
+            # get_module_logger(self.__class__.__name__).info(f"Acquiring lock {id(H['fs'].locks[str(self)])} for {str(self)} in {os.getpid()}")
+            H["cs_rlock_dict"][str(self)].acquire()
+            try:
+                if cache_key not in H["fs"]:
+                    # get_module_logger(self.__class__.__name__).info(f"calculating: {str(self)} for instrument {instrument}")
+                    df, inst_ranges = self._load_all_instruments(start_index, end_index, *args)
+                    df = self._process_df(df)
+
+                    for inst in df.columns:
+                        inst_st, inst_ed = inst_ranges.get(inst, (None, None))
+                        inst_cache_key = str(self), inst, start_index, end_index, *args
+                        inst_st = start_index if inst_st is None else max(inst_st, start_index)
+                        inst_ed = end_index if inst_ed is None else min(inst_ed, end_index)
+
+                        H["fs"][inst_cache_key] = df.loc[inst_st:inst_ed, inst]
+                # else:
+                #     get_module_logger(self.__class__.__name__).info(f"cache hit after waiting: {str(self)}")
+            finally:
+                # get_module_logger(self.__class__.__name__).info(f"Release lock {id(H['fs'].locks[str(self)])} for {str(self)} in {os.getpid()}")
+                H["cs_rlock_dict"][str(self)].release()
+
+        return H["fs"][cache_key]
+
+    def _load_all_instruments(self, start_index, end_index, *args) -> pd.DataFrame:
+        if isinstance(getattr(self, "population"), dict):
+
+            def mask_data(series, spans):
+                if bool(spans) and not series.empty:
+                    mask = np.zeros(len(series), dtype=bool)
+                    for begin, end in spans:
+                        mask |= (series.index >= begin) & (series.index <= end)
+                    series = series.copy()
+                    series[~mask] = np.nan
+                return series
+
+            sub_features = [
+                mask_data(self.feature.load(inst, start_index, end_index, *args).rename(inst), spans)
+                for inst, spans in getattr(self, "population", {}).items()
+            ]
+        else:
+            sub_features = [
+                self.feature.load(inst, start_index, end_index, *args).rename(inst)
+                for inst in getattr(self, "population", [])
+            ]
+        mydf = pd.concat([s for s in sub_features if not s.empty], axis=1, join="outer", sort=True)
+        inst_ranges = {s.name: (s.index.min(), s.index.max()) for s in sub_features if not s.empty}
+
+        return mydf, inst_ranges
+
+    @property
+    def require_cs_info(self):
+        return True
+
+class CSRank(XSectionOperator):
+    def _process_df(self, df, **_) -> pd.DataFrame:
+        return df.rank(axis=1, pct=True)
+
 #################### Operator which only support data with time index ####################
 # Convention
 # - The name of the operators in this section will start with "T"
@@ -1561,7 +1640,7 @@ class TResample(ElemOperator):
             else:
                 return getattr(series.resample(self.freq), self.func)()
 
-
+CSOpsList = [CSRank]
 TOpsList = [TResample]
 OpsList = [
     ChangeInstrument,
@@ -1613,7 +1692,7 @@ OpsList = [
     If,
     Feature,
     PFeature,
-] + [TResample]
+] + [TResample] + CSOpsList
 
 
 class OpsWrapper:

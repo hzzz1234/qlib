@@ -5,6 +5,8 @@
 from __future__ import division
 from __future__ import print_function
 
+from collections import deque
+import multiprocessing
 import re
 import abc
 import copy
@@ -12,10 +14,12 @@ import queue
 import bisect
 import numpy as np
 import pandas as pd
-from typing import List, Union, Optional
+from typing import Any, List, Union, Optional
 
 # For supporting multiprocessing in outer code, joblib is used
 from joblib import delayed
+
+from qlib.data.base import ExpressionOps
 
 from .cache import H
 from ..config import C
@@ -407,7 +411,7 @@ class ExpressionProvider(abc.ABC):
         return expression
 
     @abc.abstractmethod
-    def expression(self, instrument, field, start_time=None, end_time=None, freq="day") -> pd.Series:
+    def expression(self, instrument, field, start_time=None, end_time=None, freq="day",  **kwargs) -> pd.Series:
         """Get Expression data.
 
         The responsibility of `expression`
@@ -545,6 +549,46 @@ class DatasetProvider(abc.ABC):
         return [ExpressionD.get_expression_instance(f) for f in fields]
 
     @staticmethod
+    def _analysis_features(normalize_column_names):
+        """
+        Analyze the features in column_names and return the cs_level_summary, level_shared_features, feature_extended_windows
+        """
+        def _parse_col_name(field):
+            feature_instance = ExpressionD.get_expression_instance(field)
+            return field, feature_instance, feature_instance.get_extended_window_size(), 0
+
+        feature_queue = deque(_parse_col_name(field) for field in reversed(normalize_column_names))
+        all_sub_features = {}
+        cs_level_summary = {}
+        feature_extended_windows = {}
+        rlock_name_set = set()
+        while len(feature_queue) > 0:
+            this_feature_name, this_feature, extended_window, this_cs_level = feature_queue.pop()
+            cs_level_summary.setdefault(this_cs_level, {})[this_feature_name] = this_feature
+            all_sub_features.setdefault(str(this_feature), set()).add(this_cs_level)
+
+            if str(this_feature) not in feature_extended_windows:
+                feature_extended_windows[str(this_feature)] = extended_window
+            else:
+                l, r = feature_extended_windows[str(this_feature)]
+                feature_extended_windows[str(this_feature)] = (max(l, extended_window[0]), max(r, extended_window[1]))
+
+            if this_feature.require_cs_info:
+                rlock_name_set.add(str(this_feature))
+                next_cs_level = this_cs_level + 1
+            else:
+                next_cs_level = this_cs_level
+            for next_feature in this_feature.get_direct_dependents():
+                feature_queue.append((str(next_feature), next_feature, extended_window, next_cs_level))
+
+        level_shared_features = {}
+        for feature, levels in all_sub_features.items():
+            if len(levels) > 1:
+                level_shared_features.setdefault(max(levels), set[Any]()).add(feature)
+
+        return cs_level_summary, level_shared_features, feature_extended_windows, rlock_name_set
+
+    @staticmethod
     def dataset_processor(instruments_d, column_names, start_time, end_time, freq, inst_processors=[]):
         """
         Load and process the data, return the data set.
@@ -552,6 +596,10 @@ class DatasetProvider(abc.ABC):
 
         """
         normalize_column_names = normalize_cache_fields(column_names)
+        cs_level_summary, level_shared_features, feature_extended_windows, rlock_name_set = DatasetProvider._analysis_features(normalize_column_names)
+
+        population_name = hash(tuple(instruments_d))
+
         # One process for one task, so that the memory will be freed quicker.
         workers = max(min(C.get_kernels(freq), len(instruments_d)), 1)
 
@@ -559,24 +607,141 @@ class DatasetProvider(abc.ABC):
         if isinstance(instruments_d, dict):
             it = instruments_d.items()
         else:
-            it = zip(instruments_d, [None] * len(instruments_d))
+            it = list(zip(instruments_d, [None] * len(instruments_d)))
 
-        inst_l = []
-        task_l = []
-        for inst, spans in it:
-            inst_l.append(inst)
-            task_l.append(
-                delayed(DatasetProvider.inst_calculator)(
-                    inst, start_time, end_time, freq, normalize_column_names, spans, C, inst_processors
+        cs_levels = sorted(cs_level_summary, reverse=True)
+        class CSShuffler:
+            def __init__(self, cs_level_expressions):
+                self.col_names = list(
+                    reversed(
+                        sorted(
+                            cs_level_expressions.keys(),
+                            key=lambda colname: int(cs_level_expressions[colname].require_cs_info),
+                            reverse=True,
+                        )
+                    )
+                )
+                self.cs_idxes = set(
+                    idx for idx, col_name in enumerate(self.col_names) if cs_level_expressions[col_name].require_cs_info
+                )
+
+            def __call__(self):
+                if bool(self.cs_idxes):
+                    this_idx = self.cs_idxes.pop()
+                    col_names = self.col_names.copy()
+                    del col_names[this_idx]
+                    return [self.col_names[this_idx]] + col_names
+                return self.col_names
+
+        if len(cs_levels) > 1:
+            if C["joblib_backend"] != "multiprocessing":  # pylint: disable=R1702
+                    raise RuntimeError("only multiprocessing backend is supported for cross-section data")
+
+            ts_cache = {}
+            # fetch all shared features compose a list
+            global_shared_features = set([item for level, feature_set in level_shared_features.items() for item in feature_set])
+            with multiprocessing.Manager() as manager:
+                get_module_logger("data").info("shared memory created")
+                shared_data_cache = manager.dict()
+                rlock_dict = {name: manager.RLock() for name in rlock_name_set}
+                get_module_logger("data").info("Using shared memory for cross-section data cache")
+                get_module_logger("data").info(f"num cs_levels: {len(cs_levels)}")
+                for dep_level in cs_levels[:-1]:
+                    expressions = cs_level_summary[dep_level]
+                    shuffler = CSShuffler(expressions)
+                    get_module_logger("data").info(f"cs level start: {str(dep_level)} with {str(expressions)}")
+                    cache_task_l = [
+                        delayed(DatasetProvider.load_cache)(
+                            inst,
+                            start_time=start_time,
+                            end_time=end_time,
+                            freq=freq,
+                            column_names=shuffler(),
+                            expressions=expressions,
+                            feature_extended_windows=feature_extended_windows,
+                            g_config=C,
+                            population_name=population_name,  # for cache key
+                            population=instruments_d,
+                            cache_data=ts_cache.get(inst, {}),
+                            shared_cache=shared_data_cache,
+                            rlock_dict=rlock_dict,
+                            shared_features=global_shared_features,
+                        )
+                        for inst, _ in it
+                    ]
+                    result = ParallelExt(n_jobs=workers, backend=C.joblib_backend, maxtasksperchild=C.maxtasksperchild)(
+                        cache_task_l
+                    )
+                    shared_data_cache.clear()
+                    for inst_cache in result:
+                        for k, v in inst_cache.items():
+                            if k[0] in global_shared_features:
+                                if k[1] not in ts_cache:
+                                    ts_cache[k[1]] = {}
+
+                                if k not in ts_cache[k[1]]:
+                                    ts_cache[k[1]][k] = v
+    
+                            elif k[0] in expressions:
+                                shared_data_cache[k] = v
+                    get_module_logger("data").info(f"cs level finished: {str(dep_level)}")
+
+                get_module_logger("data").info("Start to calculate the final data")        
+
+                shuffler = CSShuffler(cs_level_summary[0])
+                inst_l, task_l = zip(
+                    *list(
+                        (
+                            inst,
+                            delayed(DatasetProvider.inst_calculator)(
+                                inst,
+                                start_time=start_time,
+                                end_time=end_time,
+                                freq=freq,
+                                column_names=shuffler(),
+                                expressions=cs_level_summary[0],
+                                spans=spans,
+                                g_config=C,
+                                inst_processors=inst_processors,
+                                feature_extended_windows=feature_extended_windows,
+                                population_name=population_name,  # for cache key
+                                population=instruments_d,
+                                cache_data=ts_cache.get(inst, {}),
+                                shared_cache=shared_data_cache,
+                                rlock_dict=rlock_dict,
+                            ),
+                        )
+                        for inst, spans in it
+                    )
+                )
+
+                data = dict(
+                    zip(
+                        inst_l,
+                        ParallelExt(n_jobs=workers, backend=C.joblib_backend, maxtasksperchild=C.maxtasksperchild)(task_l),
+                    )
+                )
+                get_module_logger("data").info("end to calculate the final data")
+                del shared_data_cache
+                ts_cache.clear()
+                get_module_logger("data").info("shared memory released")
+        else:
+            inst_l = []
+            task_l = []
+            for inst, spans in it:
+                inst_l.append(inst)
+                task_l.append(
+                    delayed(DatasetProvider.inst_calculator)(
+                        inst, start_time, end_time, freq, normalize_column_names, spans, C, inst_processors
+                    )
+                )
+
+            data = dict(
+                zip(
+                    inst_l,
+                    ParallelExt(n_jobs=workers, backend=C.joblib_backend, maxtasksperchild=C.maxtasksperchild)(task_l),
                 )
             )
-
-        data = dict(
-            zip(
-                inst_l,
-                ParallelExt(n_jobs=workers, backend=C.joblib_backend, maxtasksperchild=C.maxtasksperchild)(task_l),
-            )
-        )
 
         new_data = dict()
         for inst in sorted(data.keys()):
@@ -597,7 +762,64 @@ class DatasetProvider(abc.ABC):
         return data
 
     @staticmethod
-    def inst_calculator(inst, start_time, end_time, freq, column_names, spans=None, g_config=None, inst_processors=[]):
+    def load_cache(
+        inst,
+        start_time,
+        end_time,
+        freq,
+        column_names,
+        expressions,
+        feature_extended_windows={},
+        g_config=None,
+        population={},
+        population_name="",  # for cache key
+        shared_features=set(),
+        cache_data=None,
+        shared_cache=None,
+        rlock_dict=None,
+    ):
+        """
+        Load the cache data for **one** instrument, return a df result.
+
+        return value: A data frame with index 'datetime' and other data columns.
+
+        """
+        C.register_from_C(g_config)
+        if cache_data is not None:
+            H["f"].update(cache_data)
+        if shared_cache is not None:
+            H.set_shared_cache(shared_cache)
+        if rlock_dict is not None:
+            H.set_rlock_dict(rlock_dict)
+
+        obj = {}
+        for field in column_names:
+            #  The client does not have expression provider, the data will be loaded from cache using static method.
+            ExpressionD.expression(
+                inst,
+                expressions[field],
+                start_time,
+                end_time,
+                freq,
+                instrument_d=population,
+                extend_windows=feature_extended_windows.get(str(expressions[field]), (0, 0)),
+                population_name=population_name,
+            )
+
+            for k, v in H["f"].internal_data.items():
+                if k[1] in inst and (k[0] in column_names or k[0] in shared_features) and k not in obj:
+                    obj[k] = v
+        return obj
+
+    @staticmethod
+    def inst_calculator(inst, start_time, end_time, freq, column_names, expressions,spans=None, g_config=None, inst_processors=[], 
+        feature_extended_windows={},
+        population_name="",
+        population={},
+        cache_data=None,
+        shared_cache=None,
+        rlock_dict=None,
+    ):
         """
         Calculate the expressions for **one** instrument, return a df result.
         If the expression has been calculated before, load from cache.
@@ -609,11 +831,29 @@ class DatasetProvider(abc.ABC):
         # NOTE: This place is compatible with windows, windows multi-process is spawn
         C.register_from_C(g_config)
 
+        if cache_data is not None:
+            H["f"].update(cache_data)
+
+        if shared_cache is not None:
+            H.set_shared_cache(shared_cache)
+
+        if rlock_dict is not None:
+            H.set_rlock_dict(rlock_dict)
+
         obj = dict()
         for field in column_names:
             #  The client does not have expression provider, the data will be loaded from cache using static method.
-            obj[field] = ExpressionD.expression(inst, field, start_time, end_time, freq)
-
+            obj[field] = ExpressionD.expression(
+                inst,
+                expressions[field],
+                start_time,
+                end_time,
+                freq,
+                instrument_d=population,
+                extend_windows=feature_extended_windows.get(str(expressions[field]), (0, 0)),
+                population_name=population_name,
+            )
+        
         data = pd.DataFrame(obj)
         if not data.empty and not np.issubdtype(data.index.dtype, np.dtype("M")):
             # If the underlaying provides the data not in datetime format, we'll convert it into datetime format
@@ -840,8 +1080,14 @@ class LocalExpressionProvider(ExpressionProvider):
         super().__init__()
         self.time2idx = time2idx
 
-    def expression(self, instrument, field, start_time=None, end_time=None, freq="day"):
-        expression = self.get_expression_instance(field)
+    def expression(self, instrument, field, start_time=None, end_time=None, freq="day",
+        instrument_d={},
+        population_name="",
+        extend_windows=(0, 0),
+    ):
+        expression = field
+        if isinstance(expression, str):
+            expression = self.get_expression_instance(expression)
         start_time = time_to_slc_point(start_time)
         end_time = time_to_slc_point(end_time)
 
@@ -852,8 +1098,21 @@ class LocalExpressionProvider(ExpressionProvider):
             _, _, start_index, end_index = Cal.locate_index(start_time, end_time, freq=freq, future=False)
             lft_etd, rght_etd = expression.get_extended_window_size()
             query_start, query_end = max(0, start_index - lft_etd), end_index + rght_etd
+            if isinstance(instrument_d, dict):
+                instrument_d = {
+                    inst: [Cal.locate_index(span[0], span[1], freq=freq, future=False)[2:] for span in spans]
+                    for inst, spans in instrument_d.items()
+                }
         else:
             start_index, end_index = query_start, query_end = start_time, end_time
+            if isinstance(instrument_d, dict):
+                instrument_d = {
+                    inst: [[pd.Timestamp(span[0]), pd.Timestamp(span[1])] for span in spans]
+                    for inst, spans in instrument_d.items()
+                }
+
+        if isinstance(expression, ExpressionOps):
+            expression.set_population(instrument_d)
 
         try:
             series = expression.load(instrument, query_start, query_end, freq)
