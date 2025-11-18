@@ -21,6 +21,7 @@ import multiprocessing
 from pathlib import Path
 from typing import Callable, Optional, Union
 from typing import TYPE_CHECKING
+import numpy as np
 
 from qlib.constant import REG_CN, REG_US, REG_TW
 
@@ -140,6 +141,7 @@ _default_config = {
     "expression_provider": "LocalExpressionProvider",
     "dataset_provider": "LocalDatasetProvider",
     "provider": "LocalProvider",
+    "feature_float_type": "float32", # float32 or float64 or float16
     # config it in qlib.init()
     # "provider_uri" str or dict:
     #   # str
@@ -399,6 +401,21 @@ class QlibConfig(Config):
     @property
     def dpm(self):
         return self.DataPathManager(self["provider_uri"], self["mount_path"])
+
+    @property
+    def float_type(self):
+        if self["feature_float_type"] == "float16":
+            return np.float16
+        elif self["feature_float_type"] == "float32":
+            return np.float32
+        elif self["feature_float_type"] == "float64":
+            return np.float64
+        else:
+            from .utils import get_module_logger  # pylint: disable=C0415
+            logger = get_module_logger("Initialization", self.logging_level)
+            logger.warning(f"feature_float_type must be one of ['float32', 'float64', 'float16'], but got {self['feature_float_type']}, use default float32")
+            return np.float32
+        
 
     def resolve_path(self):
         # resolve path

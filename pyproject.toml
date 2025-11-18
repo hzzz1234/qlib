@@ -117,3 +117,4 @@ qrun = "qlib.cli.run:run"
 [tool.setuptools_scm]
 local_scheme = "no-local-version"
 version_scheme = "guess-next-dev"
+fallback_version = "0.9.8.hzdev"

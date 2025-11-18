@@ -726,15 +726,26 @@ class DatasetProvider(abc.ABC):
                 ts_cache.clear()
                 get_module_logger("data").info("shared memory released")
         else:
-            inst_l = []
-            task_l = []
-            for inst, spans in it:
-                inst_l.append(inst)
-                task_l.append(
-                    delayed(DatasetProvider.inst_calculator)(
-                        inst, start_time, end_time, freq, normalize_column_names, spans, C, inst_processors
+            shuffler = CSShuffler(cs_level_summary[0])
+            inst_l, task_l = zip(
+                *list(
+                    (
+                        inst,
+                        delayed(DatasetProvider.inst_calculator)(
+                            inst,
+                            start_time=start_time,
+                            end_time=end_time,
+                            freq=freq,
+                            column_names=shuffler(),
+                            expressions=cs_level_summary[0],
+                            spans=spans,
+                            g_config=C,
+                            inst_processors=inst_processors,
+                        ),
                     )
+                    for inst, spans in it
                 )
+            )
 
             data = dict(
                 zip(
@@ -742,6 +753,22 @@ class DatasetProvider(abc.ABC):
                     ParallelExt(n_jobs=workers, backend=C.joblib_backend, maxtasksperchild=C.maxtasksperchild)(task_l),
                 )
             )
+            # inst_l = []
+            # task_l = []
+            # for inst, spans in it:
+            #     inst_l.append(inst)
+            #     task_l.append(
+            #         delayed(DatasetProvider.inst_calculator)(
+            #             inst, start_time, end_time, freq, normalize_column_names, spans, C, inst_processors
+            #         )
+            #     )
+
+            # data = dict(
+            #     zip(
+            #         inst_l,
+            #         ParallelExt(n_jobs=workers, backend=C.joblib_backend, maxtasksperchild=C.maxtasksperchild)(task_l),
+            #     )
+            # )
 
         new_data = dict()
         for inst in sorted(data.keys()):
@@ -1128,7 +1155,7 @@ class LocalExpressionProvider(ExpressionProvider):
         # 1) The stock data is currently float. If there is other types of data, this part needs to be re-implemented.
         # 2) The precision should be configurable
         try:
-            series = series.astype(np.float32)
+            series = series.astype(C.float_type)
         except ValueError:
             pass
         except TypeError:

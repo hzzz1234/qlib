@@ -354,6 +354,60 @@ class Power(NpPairOperator):
     def __init__(self, feature_left, feature_right):
         super(Power, self).__init__(feature_left, feature_right, "power")
 
+class SignedPower(NpPairOperator):
+    """Signed Power Operator
+
+    Parameters
+    ----------
+    feature_left : Expression
+        feature instance
+    feature_right : Expression
+        feature instance
+
+    Returns
+    ----------
+    Feature:
+        The signed power of feature_left raised to feature_right
+    """
+
+    def __init__(self, feature_left, feature_right):
+        super(SignedPower, self).__init__(feature_left, feature_right, "multiply")
+
+    def _load_internal(self, instrument, start_index, end_index, *args):
+        assert any(
+            [isinstance(self.feature_left, (Expression,)), isinstance(self.feature_right, (Expression,))]
+        ), "at least one of two inputs is Expression instance"
+        if isinstance(self.feature_left, (Expression,)):
+            series_left = self.feature_left.load(instrument, start_index, end_index, *args)
+        else:
+            series_left = self.feature_left  # numeric value
+        if isinstance(self.feature_right, (Expression,)):
+            series_right = self.feature_right.load(instrument, start_index, end_index, *args)
+        else:
+            series_right = self.feature_right
+        # 计算带符号的幂：sign(x) * |x|^y
+        res = np.sign(series_left) * (np.abs(series_left) ** series_right)
+        return res
+
+
+class Sqrt(NpPairOperator):
+    """Square Root Operator
+
+    Parameters
+    ----------
+    feature_left : Expression
+        feature instance
+    feature_right : Expression
+        feature instance
+
+    Returns
+    ----------
+    Feature:
+        The square root of feature_left
+    """
+
+    def __init__(self, feature_left, feature_right):
+        super(Sqrt, self).__init__(feature_left, feature_right, "sqrt")
 
 class Add(NpPairOperator):
     """Add Operator
@@ -634,6 +688,83 @@ class Or(NpPairOperator):
     def __init__(self, feature_left, feature_right):
         super(Or, self).__init__(feature_left, feature_right, "bitwise_or")
 
+
+class Cross(ExpressionOps):
+    """Cross Operator
+
+    Detect if feature A crosses above feature B (Golden Cross)
+    Need to satisfy two conditions simultaneously:
+    1. Current period: A_t > B_t
+    2. Previous period: A_{t-1} <= B_{t-1}
+
+    Parameters
+    ----------
+    feature_left : Expression
+        feature instance (A)
+    feature_right : Expression
+        feature instance (B)
+
+    Returns
+    ----------
+    Feature:
+        bool series indicate A crosses above B
+    """
+
+    def __init__(self, feature_left, feature_right):
+        self.feature_left = feature_left
+        self.feature_right = feature_right
+
+    def __str__(self):
+        return "{}({}, {})".format(type(self).__name__, self.feature_left, self.feature_right)
+
+    def _load_internal(self, instrument, start_index, end_index, *args):
+        # Get current values
+        series_left = self.feature_left.load(instrument, start_index, end_index, *args)
+        series_right = self.feature_right.load(instrument, start_index, end_index, *args)
+        
+        # Get previous values (t-1)
+        prev_left = series_left.shift(1)
+        prev_right = series_right.shift(1)
+        
+        # Check both conditions and return the result for Golden Cross
+        cond1 = series_left > series_right
+        cond2 = prev_left <= prev_right
+
+        # Check both conditions and return the result for Death Cross
+        cond3 = series_left < series_right
+        cond4 = prev_left >= prev_right
+
+        # result Golden Cross value is 1 and Death Cross value is -1 other values are 0
+        # 合并条件：Golden Cross 为 1，Death Cross 为 -1，其余为 0
+        result = np.where(cond1 & cond2, 1,
+                 np.where(cond3 & cond4, -1, 0))
+        return pd.Series(result, index=series_left.index)
+
+    def get_longest_back_rolling(self):
+        if isinstance(self.feature_left, (Expression,)):
+            left_br = self.feature_left.get_longest_back_rolling()
+        else:
+            left_br = 0
+
+        if isinstance(self.feature_right, (Expression,)):
+            right_br = self.feature_right.get_longest_back_rolling()
+        else:
+            right_br = 0
+        return max(left_br, right_br) + 1  # +1 because we need previous period data
+
+    def get_extended_window_size(self):
+        if isinstance(self.feature_left, (Expression,)):
+            ll, lr = self.feature_left.get_extended_window_size()
+        else:
+            ll, lr = 0, 0
+
+        if isinstance(self.feature_right, (Expression,)):
+            rl, rr = self.feature_right.get_extended_window_size()
+        else:
+            rl, rr = 0, 0
+            
+        # Need to extend window by 1 for previous period data
+        return max(ll + 1, rl + 1), max(lr - 1, rr - 1)
 
 #################### Triple-wise Operator ####################
 class If(ExpressionOps):
@@ -1382,6 +1513,22 @@ class EMA(Rolling):
             series = series.ewm(span=self.N, min_periods=1).mean()
         return series
 
+class DecayLinear(Rolling):
+    """
+    Rolling Decay Linear
+    """
+    def __init__(self, feature, N):
+        super(DecayLinear, self).__init__(feature, N, "decay_linear")
+
+    def _load_internal(self, instrument, start_index, end_index, *args):
+        series = self.feature.load(instrument, start_index, end_index, *args)
+        weights = np.arange(self.N) + 1
+        sum_weights = weights.sum()
+        if self.N == 0:
+            series = series
+        else:
+            series = series.rolling(self.N, min_periods=1).apply(lambda x: np.sum(weights*x)/sum_weights, raw=True)
+        return series
 
 #################### Pair-Wise Rolling ####################
 class PairRolling(ExpressionOps):
@@ -1523,6 +1670,18 @@ class Cov(PairRolling):
 
 #################### cross section operator ####################
 class XSectionOperator(ElemOperator):
+    """Base class for cross section operator
+
+    Parameters
+    ----------
+    feature : Expression
+        feature instance
+
+    Returns
+    ----------
+    Expression
+        a feature instance with cross section operation of input feature
+    """
     producer_instrument = {}
 
     def set_population(self, population):
@@ -1596,8 +1755,58 @@ class XSectionOperator(ElemOperator):
         return True
 
 class CSRank(XSectionOperator):
+    """Cross section rank
+
+    Parameters
+    ----------
+    feature : Expression
+        feature instance
+
+    Returns
+    ----------
+    Expression
+        a feature instance with cross section rank of input feature
+    """
     def _process_df(self, df, **_) -> pd.DataFrame:
         return df.rank(axis=1, pct=True)
+
+class CSBin(XSectionOperator):
+    """Cross section bin
+
+    Parameters
+    ----------
+    feature : Expression
+        feature instance
+
+    Returns
+    ----------
+    Expression
+        a feature instance with cross section bin of input feature
+    """
+    def __init__(self, feature, N_BINS=3):
+        self.feature = feature
+        self.N_BINS = N_BINS
+        super().__init__(feature)
+
+    def _process_df(self, df, **_) -> pd.DataFrame:
+        def row_equal_width_cut(row):
+            """
+            对单行数据（Series）执行等寬分箱 (pd.cut)。
+            """
+            # 1. 对该行所有值进行 pd.cut 操作
+            # bins=N_BINS (例如 3) 会在行内最大值和最小值之间创建 3 个等宽区间
+            # labels=False 返回分桶的数字编号 (0, 1, 2)
+            binned_labels = pd.cut(
+                row,               # 输入的是该行的所有数值
+                bins=self.N_BINS,       # 划分的组数
+                labels=False,      # 返回数字标签 (0, 1, 2...)
+                include_lowest=True # 确保包含最小值
+            )
+            
+            # +1 是为了使标签从 1 开始 (1, 2, 3)
+            return binned_labels + 1
+
+        return df.apply(row_equal_width_cut, axis=1)
 
 #################### Operator which only support data with time index ####################
 # Convention
@@ -1642,6 +1851,7 @@ class TResample(ElemOperator):
 
 CSOpsList = [CSRank]
 TOpsList = [TResample]
+AdditionList = [DecayLinear, SignedPower]
 OpsList = [
     ChangeInstrument,
     Rolling,
@@ -1679,6 +1889,7 @@ OpsList = [
     Less,
     And,
     Or,
+    Cross,
     Not,
     Gt,
     Ge,
@@ -1692,7 +1903,7 @@ OpsList = [
     If,
     Feature,
     PFeature,
-] + [TResample] + CSOpsList
+] + [TResample] + CSOpsList + AdditionList
 
 
 class OpsWrapper:
