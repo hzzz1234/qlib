@@ -371,7 +371,7 @@ class SignedPower(NpPairOperator):
     """
 
     def __init__(self, feature_left, feature_right):
-        super(SignedPower, self).__init__(feature_left, feature_right, "multiply")
+        super(SignedPower, self).__init__(feature_left, feature_right, "signed_power")
 
     def _load_internal(self, instrument, start_index, end_index, *args):
         assert any(
@@ -689,13 +689,15 @@ class Or(NpPairOperator):
         super(Or, self).__init__(feature_left, feature_right, "bitwise_or")
 
 
-class Cross(ExpressionOps):
+class Cross(NpPairOperator):
     """Cross Operator
 
     Detect if feature A crosses above feature B (Golden Cross)
     Need to satisfy two conditions simultaneously:
     1. Current period: A_t > B_t
     2. Previous period: A_{t-1} <= B_{t-1}
+    3. Current period: A_t <= B_t
+    4. Previous period: A_{t-1} > B_{t-1}
 
     Parameters
     ----------
@@ -711,16 +713,23 @@ class Cross(ExpressionOps):
     """
 
     def __init__(self, feature_left, feature_right):
-        self.feature_left = feature_left
-        self.feature_right = feature_right
+        super(Cross, self).__init__(feature_left, feature_right, "cross")
 
     def __str__(self):
         return "{}({}, {})".format(type(self).__name__, self.feature_left, self.feature_right)
 
     def _load_internal(self, instrument, start_index, end_index, *args):
-        # Get current values
-        series_left = self.feature_left.load(instrument, start_index, end_index, *args)
-        series_right = self.feature_right.load(instrument, start_index, end_index, *args)
+        assert any(
+            [isinstance(self.feature_left, (Expression,)), isinstance(self.feature_right, (Expression,))]
+        ), "at least one of two inputs is Expression instance"
+        if isinstance(self.feature_left, (Expression,)):
+            series_left = self.feature_left.load(instrument, start_index, end_index, *args)
+        else:
+            series_left = self.feature_left  # numeric value
+        if isinstance(self.feature_right, (Expression,)):
+            series_right = self.feature_right.load(instrument, start_index, end_index, *args)
+        else:
+            series_right = self.feature_right
         
         # Get previous values (t-1)
         prev_left = series_left.shift(1)
@@ -739,32 +748,6 @@ class Cross(ExpressionOps):
         result = np.where(cond1 & cond2, 1,
                  np.where(cond3 & cond4, -1, 0))
         return pd.Series(result, index=series_left.index)
-
-    def get_longest_back_rolling(self):
-        if isinstance(self.feature_left, (Expression,)):
-            left_br = self.feature_left.get_longest_back_rolling()
-        else:
-            left_br = 0
-
-        if isinstance(self.feature_right, (Expression,)):
-            right_br = self.feature_right.get_longest_back_rolling()
-        else:
-            right_br = 0
-        return max(left_br, right_br) + 1  # +1 because we need previous period data
-
-    def get_extended_window_size(self):
-        if isinstance(self.feature_left, (Expression,)):
-            ll, lr = self.feature_left.get_extended_window_size()
-        else:
-            ll, lr = 0, 0
-
-        if isinstance(self.feature_right, (Expression,)):
-            rl, rr = self.feature_right.get_extended_window_size()
-        else:
-            rl, rr = 0, 0
-            
-        # Need to extend window by 1 for previous period data
-        return max(ll + 1, rl + 1), max(lr - 1, rr - 1)
 
 #################### Triple-wise Operator ####################
 class If(ExpressionOps):
