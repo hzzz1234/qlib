@@ -937,6 +937,281 @@ class Ref(Rolling):
             rght_etd = max(rght_etd - self.N, rght_etd)
             return lft_etd, rght_etd
 
+#################### FutureRolling ####################
+class FutureRolling(ExpressionOps):
+    """Future Rolling Window Operator
+
+    Applies a rolling window calculation on future time periods.
+    For each time point t, computes aggregation over the next N periods [t+1, t+N].
+
+    Parameters
+    ----------
+    feature : Expression
+        feature instance to apply the rolling window on
+    N : int
+        size of the forward-looking window
+    func : callable
+        aggregation function to apply on the window (e.g., lambda x: x.mean())
+
+    Returns
+    -------
+    Expression
+        a feature instance with aggregated future values
+
+    Examples
+    --------
+    >>> # Calculate mean of next 5 days
+    >>> FutureRolling($close, 5, lambda x: x.mean())
+    >>> # Calculate max of next 10 days
+    >>> FutureRolling($high, 10, lambda x: x.max())
+    """
+
+    def __init__(self, feature, N, func):
+        self.feature = feature
+        self.N = N
+        self.func = func
+
+    def __str__(self):
+        return "{}({},{})".format(type(self).__name__, self.feature, self.N)
+
+    def _load_internal(self, instrument, start_index, end_index, *args):
+        series = self.feature.load(instrument, start_index, end_index, *args)
+        
+        if self.N == 0:
+            # Window size of 0 returns the series as-is
+            return series
+        
+        # Create result array
+        result = np.empty(len(series))
+        result[:] = np.nan
+        
+        # For each position, calculate the aggregation over the next N values
+        for i in range(len(series)):
+            # Get the next N values (excluding current position i)
+            future_start = i + 1
+            future_end = min(i + 1 + self.N, len(series))
+            future_window = series.iloc[future_start:future_end]
+            
+            if len(future_window) >= self.N:
+                # We have enough future data, use only future values
+                result[i] = getattr(future_window, self.func)()
+            elif len(future_window) > 0:
+                # Not enough future data, use only future values
+                result[i] = getattr(future_window, self.func)()
+            else:
+                # No future data at all, use only current value
+                result[i] = getattr(np.array([series.iloc[i]]), self.func)()
+            
+        return pd.Series(result, index=series.index)
+
+    def get_longest_back_rolling(self):
+        # FutureRolling doesn't look backward, only forward
+        return self.feature.get_longest_back_rolling()
+
+    def get_extended_window_size(self):
+        # Need to extend the right side (future) to get enough data
+        # Since we shift(-1) and need N values, we need N additional future points
+        lft_etd, rght_etd = self.feature.get_extended_window_size()
+        rght_etd = max(rght_etd + self.N, rght_etd)
+        return lft_etd, rght_etd
+
+class FutureMax(FutureRolling):
+    def __init__(self, feature, N):
+        super(FutureMax, self).__init__(feature, N, "max")
+
+class FutureMin(FutureRolling):
+    def __init__(self, feature, N):
+        super(FutureMin, self).__init__(feature, N, "min")
+
+class FutureMean(FutureRolling):
+    def __init__(self, feature, N):
+        super(FutureMean, self).__init__(feature, N, "mean")
+
+class FutureMed(FutureRolling):
+    def __init__(self, feature, N):
+        super(FutureMed, self).__init__(feature, N, "median")   
+
+class FutureStd(FutureRolling):
+    def __init__(self, feature, N):
+        super(FutureStd, self).__init__(feature, N, "std") 
+
+class FutureVar(FutureRolling):
+    def __init__(self, feature, N):
+        super(FutureVar, self).__init__(feature, N, "var") 
+
+class FutureSum(FutureRolling):
+    def __init__(self, feature, N):
+        super(FutureSum, self).__init__(feature, N, "sum") 
+
+#################### TripleBarrier ####################
+class TripleBarrier(ExpressionOps):
+    """Triple Barrier Method Operator
+
+    Labels each time point based on which barrier is hit first in the future:
+    - Returns 1 if upper barrier is hit first (bullish signal)
+    - Returns -1 if lower barrier is hit first (bearish signal)
+    - Returns 0 if time barrier is hit first without hitting price barriers (neutral)
+
+    This is a commonly used labeling method in quantitative finance for supervised learning,
+    particularly in Lopez de Prado's "Advances in Financial Machine Learning".
+
+    Parameters
+    ----------
+    feature : Expression
+        price feature to monitor (typically close price)
+    upper : float or Expression
+        upper barrier threshold (can be a numeric value or an Expression for dynamic barriers)
+    lower : float or Expression
+        lower barrier threshold (can be a numeric value or an Expression for dynamic barriers)
+    time_barrier : int
+        maximum number of periods to wait before giving up
+    use_percentage : bool, default=True
+        if True, barriers represent percentage changes (e.g., 0.02 = 2%)
+        if False, barriers represent absolute price changes
+
+    Returns
+    -------
+    Expression
+        Series with labels: 1 (upper barrier hit), -1 (lower barrier hit), 0 (time barrier hit)
+
+    Examples
+    --------
+    >>> # Label with 2% up/down barriers, 5-day time limit
+    >>> TripleBarrier($close, 0.02, 0.02, 5, use_percentage=True)
+    >>> # Label with $3 absolute barriers, 10-day time limit
+    >>> TripleBarrier($close, 3, 3, 10, use_percentage=False)
+    >>> # Dynamic barriers using volatility (e.g., 2x ATR)
+    >>> atr = Mean(($high - $low), 14)  # Simple ATR approximation
+    >>> TripleBarrier($close, atr * 2, atr * 2, 5, use_percentage=False)
+    """
+
+    def __init__(self, feature, upper, lower, time_barrier, use_percentage):
+        self.feature = feature
+        self.upper = upper
+        self.lower = lower
+        self.time_barrier = time_barrier
+        self.use_percentage = use_percentage
+
+    def __str__(self):
+        return "{}({},{},{},{},{})".format(
+            type(self).__name__, 
+            self.feature, 
+            self.upper, 
+            self.lower, 
+            self.time_barrier,
+            self.use_percentage
+        )
+
+    def _load_internal(self, instrument, start_index, end_index, *args):
+        series = self.feature.load(instrument, start_index, end_index, *args)
+        
+        # Load upper and lower barriers (they can be Expression objects or numeric values)
+        if isinstance(self.upper, Expression):
+            upper_series = self.upper.load(instrument, start_index, end_index, *args)
+        else:
+            upper_series = self.upper  # numeric value
+            
+        if isinstance(self.lower, Expression):
+            lower_series = self.lower.load(instrument, start_index, end_index, *args)
+        else:
+            lower_series = self.lower  # numeric value
+        
+        # Initialize result array with zeros (time barrier hit by default)
+        result = np.zeros(len(series))
+        
+        # For each time point, check future prices
+        for i in range(len(series)):
+            current_price = series.iloc[i]
+            
+            # Get barrier values for this time point
+            if isinstance(upper_series, (pd.Series, np.ndarray)):
+                upper_val = upper_series.iloc[i] if isinstance(upper_series, pd.Series) else upper_series[i]
+            else:
+                upper_val = upper_series
+                
+            if isinstance(lower_series, (pd.Series, np.ndarray)):
+                lower_val = lower_series.iloc[i] if isinstance(lower_series, pd.Series) else lower_series[i]
+            else:
+                lower_val = lower_series
+            
+            # Get future window (up to time_barrier periods ahead)
+            future_end = min(i + self.time_barrier + 1, len(series))
+            future_prices = series.iloc[i+1:future_end]
+            
+            if len(future_prices) == 0:
+                # No future data available
+                result[i] = 0
+                continue
+            
+            # Calculate barriers based on current price
+            if self.use_percentage:
+                upper_barrier = current_price * (1 + upper_val)
+                lower_barrier = current_price * (1 - lower_val)
+            else:
+                upper_barrier = current_price + upper_val
+                lower_barrier = current_price - lower_val
+            
+            # Check which barrier is hit first
+            upper_hit = future_prices >= upper_barrier
+            lower_hit = future_prices <= lower_barrier
+            
+            # Find first occurrence of each barrier
+            upper_idx = np.where(upper_hit)[0]
+            lower_idx = np.where(lower_hit)[0]
+            
+            if len(upper_idx) > 0 and len(lower_idx) > 0:
+                # Both barriers were hit, check which came first
+                if upper_idx[0] < lower_idx[0]:
+                    result[i] = 1  # Upper barrier hit first
+                else:
+                    result[i] = -1  # Lower barrier hit first
+            elif len(upper_idx) > 0:
+                # Only upper barrier was hit
+                result[i] = 1
+            elif len(lower_idx) > 0:
+                # Only lower barrier was hit
+                result[i] = -1
+            else:
+                # Neither barrier was hit within time limit
+                result[i] = 0
+        
+        return pd.Series(result, index=series.index)
+
+    def get_longest_back_rolling(self):
+        # TripleBarrier looks forward, not backward
+        # But need to consider dependencies from upper/lower if they are expressions
+        back_rolling = self.feature.get_longest_back_rolling()
+        
+        if isinstance(self.upper, Expression):
+            back_rolling = max(back_rolling, self.upper.get_longest_back_rolling())
+        if isinstance(self.lower, Expression):
+            back_rolling = max(back_rolling, self.lower.get_longest_back_rolling())
+            
+        return back_rolling
+
+    def get_extended_window_size(self):
+        # Need to extend the right side (future) to check future barriers
+        lft_etd, rght_etd = self.feature.get_extended_window_size()
+        
+        # Also consider window sizes from upper/lower if they are expressions
+        if isinstance(self.upper, Expression):
+            upper_lft, upper_rght = self.upper.get_extended_window_size()
+            lft_etd = max(lft_etd, upper_lft)
+            rght_etd = max(rght_etd, upper_rght)
+            
+        if isinstance(self.lower, Expression):
+            lower_lft, lower_rght = self.lower.get_extended_window_size()
+            lft_etd = max(lft_etd, lower_lft)
+            rght_etd = max(rght_etd, lower_rght)
+        
+        # Need future data for time_barrier
+        rght_etd = max(rght_etd + self.time_barrier, rght_etd)
+        return lft_etd, rght_etd
+
+
+# Alias for Triple Barrier Method
+TBM = TripleBarrier
+
 
 class Mean(Rolling):
     """Rolling Mean (MA)
@@ -1519,7 +1794,7 @@ class PairRolling(ExpressionOps):
 
     Parameters
     ----------
-    feature_left : Expression
+    feature_left : Expression©
         feature instance
     feature_right : Expression
         feature instance
@@ -1835,10 +2110,12 @@ class TResample(ElemOperator):
 CSOpsList = [CSRank]
 TOpsList = [TResample]
 AdditionList = [DecayLinear, SignedPower]
+FutureOpsList = [FutureRolling, FutureSum, FutureMed, FutureMean, FutureVar, FutureStd, FutureMax, FutureMin]
 OpsList = [
     ChangeInstrument,
     Rolling,
     Ref,
+    TripleBarrier,
     Max,
     Min,
     Sum,
@@ -1886,7 +2163,7 @@ OpsList = [
     If,
     Feature,
     PFeature,
-] + [TResample] + CSOpsList + AdditionList
+] + [TResample] + CSOpsList + AdditionList + FutureOpsList
 
 
 class OpsWrapper:
