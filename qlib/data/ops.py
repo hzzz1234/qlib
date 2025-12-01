@@ -724,16 +724,16 @@ class Cross(NpPairOperator):
         ), "at least one of two inputs is Expression instance"
         if isinstance(self.feature_left, (Expression,)):
             series_left = self.feature_left.load(instrument, start_index, end_index, *args)
+            prev_left = series_left.shift(1)
         else:
             series_left = self.feature_left  # numeric value
+            prev_left = series_left
         if isinstance(self.feature_right, (Expression,)):
             series_right = self.feature_right.load(instrument, start_index, end_index, *args)
+            prev_right = series_right.shift(1)
         else:
             series_right = self.feature_right
-        
-        # Get previous values (t-1)
-        prev_left = series_left.shift(1)
-        prev_right = series_right.shift(1)
+            prev_right = series_right
         
         # Check both conditions and return the result for Golden Cross
         cond1 = series_left > series_right
@@ -1208,9 +1208,199 @@ class TripleBarrier(ExpressionOps):
         rght_etd = max(rght_etd + self.time_barrier, rght_etd)
         return lft_etd, rght_etd
 
+class TripleBarrierHL(ExpressionOps):
+    """Triple Barrier Method with High-Low Features
+    
+    Similar to TripleBarrier, but allows using different features for upper and lower barriers.
+    This is useful when you want to use high prices for upper barriers and low prices for lower barriers.
+    
+    Labels each time point based on which barrier is hit first in the future:
+    - Returns 1 if upper barrier is hit first (bullish signal)
+    - Returns -1 if lower barrier is hit first (bearish signal)
+    - Returns 0 if time barrier is hit first without hitting price barriers (neutral)
+    
+    Parameters
+    ----------
+    feature : Expression
+        reference price feature (typically close price) used for calculating barrier thresholds
+    upper_feature : Expression
+        feature to monitor for upper barrier (typically high price)
+    lower_feature : Expression
+        feature to monitor for lower barrier (typically low price)
+    upper : float or Expression
+        upper barrier threshold (can be a numeric value or an Expression for dynamic barriers)
+    lower : float or Expression
+        lower barrier threshold (can be a numeric value or an Expression for dynamic barriers)
+    time_barrier : int
+        maximum number of periods to wait before giving up
+    use_percentage : bool, default=True
+        if True, barriers represent percentage changes (e.g., 0.02 = 2%)
+        if False, barriers represent absolute price changes
+    
+    Returns
+    -------
+    Expression
+        Series with labels: 1 (upper barrier hit), -1 (lower barrier hit), 0 (time barrier hit)
+    
+    Examples
+    --------
+    >>> # Use high/low for barriers, based on close price, with 2% thresholds
+    >>> TripleBarrierHL($close, $high, $low, 0.02, 0.02, 5, use_percentage=True)
+    >>> # Use high/low for barriers with absolute price thresholds
+    >>> TripleBarrierHL($close, $high, $low, 3, 3, 10, use_percentage=False)
+    >>> # Dynamic barriers using volatility
+    >>> atr = Mean(($high - $low), 14)
+    >>> TripleBarrierHL($close, $high, $low, atr * 2, atr * 2, 5, use_percentage=False)
+    """
+    
+    def __init__(self, feature, upper_feature, lower_feature, upper, lower, time_barrier, use_percentage):
+        self.feature = feature
+        self.upper_feature = upper_feature
+        self.lower_feature = lower_feature
+        self.upper = upper
+        self.lower = lower
+        self.time_barrier = time_barrier
+        self.use_percentage = use_percentage
+    
+    def __str__(self):
+        return "{}({},{},{},{},{},{},{})".format(
+            type(self).__name__,
+            self.feature,
+            self.upper_feature,
+            self.lower_feature,
+            self.upper,
+            self.lower,
+            self.time_barrier,
+            self.use_percentage
+        )
+    
+    def _load_internal(self, instrument, start_index, end_index, *args):
+        # Load the reference feature (e.g., close price)
+        series = self.feature.load(instrument, start_index, end_index, *args)
+        
+        # Load upper and lower monitoring features (e.g., high and low)
+        upper_feature_series = self.upper_feature.load(instrument, start_index, end_index, *args)
+        lower_feature_series = self.lower_feature.load(instrument, start_index, end_index, *args)
+        
+        # Load upper and lower barriers (they can be Expression objects or numeric values)
+        if isinstance(self.upper, Expression):
+            upper_series = self.upper.load(instrument, start_index, end_index, *args)
+        else:
+            upper_series = self.upper  # numeric value
+            
+        if isinstance(self.lower, Expression):
+            lower_series = self.lower.load(instrument, start_index, end_index, *args)
+        else:
+            lower_series = self.lower  # numeric value
+        
+        # Initialize result array with zeros (time barrier hit by default)
+        result = np.zeros(len(series))
+        
+        # For each time point, check future prices
+        for i in range(len(series)):
+            current_price = series.iloc[i]
+            
+            # Get barrier values for this time point
+            if isinstance(upper_series, (pd.Series, np.ndarray)):
+                upper_val = upper_series.iloc[i] if isinstance(upper_series, pd.Series) else upper_series[i]
+            else:
+                upper_val = upper_series
+                
+            if isinstance(lower_series, (pd.Series, np.ndarray)):
+                lower_val = lower_series.iloc[i] if isinstance(lower_series, pd.Series) else lower_series[i]
+            else:
+                lower_val = lower_series
+            
+            # Get future window (up to time_barrier periods ahead)
+            future_end = min(i + self.time_barrier + 1, len(series))
+            future_upper_prices = upper_feature_series.iloc[i+1:future_end]
+            future_lower_prices = lower_feature_series.iloc[i+1:future_end]
+            
+            if len(future_upper_prices) == 0 or len(future_lower_prices) == 0:
+                # No future data available
+                result[i] = 0
+                continue
+            
+            # Calculate barriers based on current reference price
+            if self.use_percentage:
+                upper_barrier = current_price * (1 + upper_val)
+                lower_barrier = current_price * (1 - lower_val)
+            else:
+                upper_barrier = current_price + upper_val
+                lower_barrier = current_price - lower_val
+            
+            # Check which barrier is hit first
+            upper_hit = future_upper_prices >= upper_barrier
+            lower_hit = future_lower_prices <= lower_barrier
+            
+            # Find first occurrence of each barrier
+            upper_idx = np.where(upper_hit)[0]
+            lower_idx = np.where(lower_hit)[0]
+            
+            if len(upper_idx) > 0 and len(lower_idx) > 0:
+                # Both barriers were hit, check which came first
+                if upper_idx[0] < lower_idx[0]:
+                    result[i] = 1  # Upper barrier hit first
+                else:
+                    result[i] = -1  # Lower barrier hit first
+            elif len(upper_idx) > 0:
+                # Only upper barrier was hit
+                result[i] = 1
+            elif len(lower_idx) > 0:
+                # Only lower barrier was hit
+                result[i] = -1
+            else:
+                # Neither barrier was hit within time limit
+                result[i] = 0
+        
+        return pd.Series(result, index=series.index)
+    
+    def get_longest_back_rolling(self):
+        # TripleBarrierHL looks forward, not backward
+        # But need to consider dependencies from all features
+        back_rolling = self.feature.get_longest_back_rolling()
+        back_rolling = max(back_rolling, self.upper_feature.get_longest_back_rolling())
+        back_rolling = max(back_rolling, self.lower_feature.get_longest_back_rolling())
+        
+        if isinstance(self.upper, Expression):
+            back_rolling = max(back_rolling, self.upper.get_longest_back_rolling())
+        if isinstance(self.lower, Expression):
+            back_rolling = max(back_rolling, self.lower.get_longest_back_rolling())
+            
+        return back_rolling
+    
+    def get_extended_window_size(self):
+        # Need to extend the right side (future) to check future barriers
+        lft_etd, rght_etd = self.feature.get_extended_window_size()
+        
+        # Consider window sizes from upper_feature and lower_feature
+        upper_feat_lft, upper_feat_rght = self.upper_feature.get_extended_window_size()
+        lft_etd = max(lft_etd, upper_feat_lft)
+        rght_etd = max(rght_etd, upper_feat_rght)
+        
+        lower_feat_lft, lower_feat_rght = self.lower_feature.get_extended_window_size()
+        lft_etd = max(lft_etd, lower_feat_lft)
+        rght_etd = max(rght_etd, lower_feat_rght)
+        
+        # Also consider window sizes from upper/lower barriers if they are expressions
+        if isinstance(self.upper, Expression):
+            upper_lft, upper_rght = self.upper.get_extended_window_size()
+            lft_etd = max(lft_etd, upper_lft)
+            rght_etd = max(rght_etd, upper_rght)
+            
+        if isinstance(self.lower, Expression):
+            lower_lft, lower_rght = self.lower.get_extended_window_size()
+            lft_etd = max(lft_etd, lower_lft)
+            rght_etd = max(rght_etd, lower_rght)
+        
+        # Need future data for time_barrier
+        rght_etd = max(rght_etd + self.time_barrier, rght_etd)
+        return lft_etd, rght_etd
+
 
 # Alias for Triple Barrier Method
 TBM = TripleBarrier
+TBMHL = TripleBarrierHL
 
 
 class Mean(Rolling):
@@ -2116,6 +2306,7 @@ OpsList = [
     Rolling,
     Ref,
     TripleBarrier,
+    TripleBarrierHL,
     Max,
     Min,
     Sum,

@@ -4,7 +4,7 @@ import pandas as pd
 
 from qlib.data import D
 from qlib.data.dataset.loader import QlibDataLoader
-from qlib.data.ops import ChangeInstrument, Cov, Feature, Ref, Var, TripleBarrier
+from qlib.data.ops import ChangeInstrument, Cov, Feature, Ref, Var, TripleBarrier, TripleBarrierHL
 from qlib.tests import TestOperatorData
 
 
@@ -342,6 +342,234 @@ class TestTBM(unittest.TestCase):
         
         # 验证结果
         # 第0天的价格是100，第2天价格是103，达到上边界3，应该标记为1
+        self.assertEqual(result.iloc[0], 1)
+
+
+class TestTripleBarrierHL(unittest.TestCase):
+    def setUp(self):
+        # 创建包含OHLC数据的测试序列
+        self.dates = pd.date_range(start='2020-01-01', periods=10)
+        self.close = pd.Series([100, 101, 103, 102, 105, 104, 106, 108, 107, 109], index=self.dates)
+        self.high = pd.Series([101, 102, 105, 103, 107, 105, 108, 110, 109, 111], index=self.dates)
+        self.low = pd.Series([99, 100, 102, 101, 104, 103, 105, 107, 106, 108], index=self.dates)
+        
+        # 模拟Feature对象
+        class MockFeature:
+            def __init__(self, values):
+                self.values = values
+            
+            def load(self, instrument, start_index, end_index, *args):
+                return self.values
+            
+            def get_longest_back_rolling(self):
+                return 0
+            
+            def get_extended_window_size(self):
+                return 0, 0
+        
+        self.mock_close = MockFeature(self.close)
+        self.mock_high = MockFeature(self.high)
+        self.mock_low = MockFeature(self.low)
+    
+    def test_upper_barrier_hit_with_high(self):
+        """测试使用high价格触发上边界"""
+        # 创建TripleBarrierHL算子
+        # close[0]=100, 上边界=103 (3%)
+        # high[1]=102 (未触及), high[2]=105 (触及!)
+        tbhl = TripleBarrierHL(
+            self.mock_close, self.mock_high, self.mock_low,
+            0.03, 0.03, 5, use_percentage=True
+        )
+        
+        result = tbhl._load_internal("test", 0, 10)
+        
+        # 第0天close=100，上边界=103，第2天high=105触及
+        self.assertEqual(result.iloc[0], 1)
+    
+    def test_lower_barrier_hit_with_low(self):
+        """测试使用low价格触发下边界"""
+        # 修改数据，制造low触发下边界的场景
+        close = pd.Series([100, 101, 100, 102, 105, 104, 106, 108, 107, 109], index=self.dates)
+        high = pd.Series([101, 102, 101, 103, 107, 105, 108, 110, 109, 111], index=self.dates)
+        low = pd.Series([99, 100, 97, 101, 104, 103, 105, 107, 106, 108], index=self.dates)
+        
+        self.mock_close.values = close
+        self.mock_high.values = high
+        self.mock_low.values = low
+        
+        # close[0]=100, 下边界=98 (2%)
+        # low[1]=100 (未触及), low[2]=97 (触及!)
+        tbhl = TripleBarrierHL(
+            self.mock_close, self.mock_high, self.mock_low,
+            0.03, 0.02, 5, use_percentage=True
+        )
+        
+        result = tbhl._load_internal("test", 0, 10)
+        
+        # 第0天close=100，下边界=98，第2天low=97触及
+        self.assertEqual(result.iloc[0], -1)
+    
+    def test_time_barrier_hit(self):
+        """测试时间边界被触发（high和low都未触及价格边界）"""
+        # 修改数据，制造时间边界触发的场景
+        close = pd.Series([100, 100.5, 101, 100.5, 105, 104, 106, 108, 107, 109], index=self.dates)
+        high = pd.Series([100.8, 101.2, 101.5, 101, 107, 105, 108, 110, 109, 111], index=self.dates)
+        low = pd.Series([99.5, 100, 100.5, 100, 104, 103, 105, 107, 106, 108], index=self.dates)
+        
+        self.mock_close.values = close
+        self.mock_high.values = high
+        self.mock_low.values = low
+        
+        # close[0]=100, 上边界=102 (2%), 下边界=98 (2%)
+        # 接下来3天的high都<102，low都>98
+        tbhl = TripleBarrierHL(
+            self.mock_close, self.mock_high, self.mock_low,
+            0.02, 0.02, 3, use_percentage=True
+        )
+        
+        result = tbhl._load_internal("test", 0, 10)
+        
+        # 3天内未触及价格边界，应标记为0
+        self.assertEqual(result.iloc[0], 0)
+    
+    def test_absolute_value_mode(self):
+        """测试绝对值模式"""
+        # close[0]=100, 上边界=100+5=105, 下边界=100-5=95
+        # high[2]=105 触及上边界
+        tbhl = TripleBarrierHL(
+            self.mock_close, self.mock_high, self.mock_low,
+            5, 5, 5, use_percentage=False
+        )
+        
+        result = tbhl._load_internal("test", 0, 10)
+        
+        # 第2天high=105触及上边界
+        self.assertEqual(result.iloc[0], 1)
+    
+    def test_which_barrier_first(self):
+        """测试哪个边界先被触及"""
+        # 修改数据，上边界先触及
+        close = pd.Series([100, 101, 103, 102, 97, 104, 106, 108, 107, 109], index=self.dates)
+        high = pd.Series([101, 104, 105, 103, 99, 105, 108, 110, 109, 111], index=self.dates)
+        low = pd.Series([99, 100, 102, 101, 96, 103, 105, 107, 106, 108], index=self.dates)
+        
+        self.mock_close.values = close
+        self.mock_high.values = high
+        self.mock_low.values = low
+        
+        # close[0]=100, 上边界=103 (3%), 下边界=97 (3%)
+        # high[1]=104 (day 1触及上边界)
+        # low[4]=96 (day 4触及下边界)
+        tbhl = TripleBarrierHL(
+            self.mock_close, self.mock_high, self.mock_low,
+            0.03, 0.03, 5, use_percentage=True
+        )
+        
+        result = tbhl._load_internal("test", 0, 10)
+        
+        # 上边界在day 1先触及，应标记为1
+        self.assertEqual(result.iloc[0], 1)
+    
+    def test_comparison_with_triple_barrier(self):
+        """对比TripleBarrier和TripleBarrierHL的差异"""
+        # 场景：close未触及barrier，但high/low触及了
+        close = pd.Series([100, 100.5, 101, 101.5, 105, 104, 106, 108, 107, 109], index=self.dates)
+        high = pd.Series([100.8, 101.5, 103, 102, 107, 105, 108, 110, 109, 111], index=self.dates)
+        low = pd.Series([99.5, 100, 100, 100.5, 104, 103, 105, 107, 106, 108], index=self.dates)
+        
+        mock_close = type('MockFeature', (), {
+            'values': close,
+            'load': lambda self, *args: self.values,
+            'get_longest_back_rolling': lambda self: 0,
+            'get_extended_window_size': lambda self: (0, 0)
+        })()
+        
+        mock_high = type('MockFeature', (), {
+            'values': high,
+            'load': lambda self, *args: self.values,
+            'get_longest_back_rolling': lambda self: 0,
+            'get_extended_window_size': lambda self: (0, 0)
+        })()
+        
+        mock_low = type('MockFeature', (), {
+            'values': low,
+            'load': lambda self, *args: self.values,
+            'get_longest_back_rolling': lambda self: 0,
+            'get_extended_window_size': lambda self: (0, 0)
+        })()
+        
+        # close[0]=100, 上边界=102 (2%)
+        # close序列前3天: 100.5, 101, 101.5 都未触及102
+        # high序列: 100.8, 101.5, 103 <- high[2]=103触及!
+        
+        # TripleBarrier (只看close)
+        tb = TripleBarrier(mock_close, 0.02, 0.02, 3, use_percentage=True)
+        result_tb = tb._load_internal("test", 0, 10)
+        
+        # TripleBarrierHL (看high和low)
+        tbhl = TripleBarrierHL(mock_close, mock_high, mock_low, 0.02, 0.02, 3, use_percentage=True)
+        result_tbhl = tbhl._load_internal("test", 0, 10)
+        
+        # TripleBarrier应该返回0（close未触及）
+        self.assertEqual(result_tb.iloc[0], 0)
+        
+        # TripleBarrierHL应该返回1（high触及了上边界）
+        self.assertEqual(result_tbhl.iloc[0], 1)
+    
+    def test_asymmetric_barriers(self):
+        """测试非对称边界"""
+        # 上边界3%，下边界1.5%
+        tbhl = TripleBarrierHL(
+            self.mock_close, self.mock_high, self.mock_low,
+            0.03, 0.015, 5, use_percentage=True
+        )
+        
+        result = tbhl._load_internal("test", 0, 10)
+        
+        # close[0]=100, 上边界=103, 下边界=98.5
+        # high[2]=105触及上边界
+        self.assertEqual(result.iloc[0], 1)
+
+
+class TestTBMHL(unittest.TestCase):
+    """测试TBMHL别名"""
+    def test_alias(self):
+        """测试TBMHL是TripleBarrierHL的别名"""
+        from qlib.data.ops import TBMHL
+        
+        self.assertIs(TBMHL, TripleBarrierHL)
+    
+    def test_usage(self):
+        """测试使用TBMHL别名"""
+        from qlib.data.ops import TBMHL
+        
+        dates = pd.date_range(start='2020-01-01', periods=10)
+        close = pd.Series([100, 101, 103, 102, 105, 104, 106, 108, 107, 109], index=dates)
+        high = pd.Series([101, 102, 105, 103, 107, 105, 108, 110, 109, 111], index=dates)
+        low = pd.Series([99, 100, 102, 101, 104, 103, 105, 107, 106, 108], index=dates)
+        
+        class MockFeature:
+            def __init__(self, values):
+                self.values = values
+            
+            def load(self, instrument, start_index, end_index, *args):
+                return self.values
+            
+            def get_longest_back_rolling(self):
+                return 0
+            
+            def get_extended_window_size(self):
+                return 0, 0
+        
+        mock_close = MockFeature(close)
+        mock_high = MockFeature(high)
+        mock_low = MockFeature(low)
+        
+        # 使用TBMHL别名
+        tbmhl = TBMHL(mock_close, mock_high, mock_low, 0.03, 0.03, 5, use_percentage=True)
+        result = tbmhl._load_internal("test", 0, 10)
+        
+        # 验证结果
         self.assertEqual(result.iloc[0], 1)
 
 
