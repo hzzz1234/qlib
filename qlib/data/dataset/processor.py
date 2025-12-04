@@ -371,6 +371,76 @@ class CSZFillna(Processor):
         return df
 
 
+class FilterOutlier(Processor):
+    """
+    Filter data by removing rows where values exceed specified upper/lower bounds.
+    
+    This processor removes entire rows (samples) where any value in the specified
+    fields_group falls outside the given bounds [lower, upper].
+    
+    Parameters
+    ----------
+    fields_group : str, optional
+        The field group to apply filtering on. If None, applies to all columns.
+    lower : float, optional
+        The lower bound. Values below this will cause the row to be filtered out.
+        If None, no lower bound filtering is applied.
+    upper : float, optional
+        The upper bound. Values above this will cause the row to be filtered out.
+        If None, no upper bound filtering is applied.
+    """
+
+    def __init__(self, fields_group=None, lower=None, upper=None):
+        self.fields_group = fields_group
+        self.lower = lower
+        self.upper = upper
+
+    def __call__(self, df):
+        cols = get_group_columns(df, self.fields_group)
+        mask = pd.Series(True, index=df.index)
+        
+        if self.lower is not None:
+            mask &= (df[cols] >= self.lower).all(axis=1)
+        if self.upper is not None:
+            mask &= (df[cols] <= self.upper).all(axis=1)
+        
+        return df[mask]
+
+    def readonly(self):
+        return True
+
+
+class ClipOutlier(Processor):
+    """
+    Clip data by limiting values to specified upper/lower bounds.
+    
+    This processor keeps all rows but clips values in the specified fields_group
+    to be within the range [lower, upper]. Values below lower are set to lower,
+    and values above upper are set to upper.
+    
+    Parameters
+    ----------
+    fields_group : str, optional
+        The field group to apply clipping on. If None, applies to all columns.
+    lower : float, optional
+        The lower bound. Values below this will be set to this value.
+        If None, no lower bound clipping is applied.
+    upper : float, optional
+        The upper bound. Values above this will be set to this value.
+        If None, no upper bound clipping is applied.
+    """
+
+    def __init__(self, fields_group=None, lower=None, upper=None):
+        self.fields_group = fields_group
+        self.lower = lower
+        self.upper = upper
+
+    def __call__(self, df):
+        cols = get_group_columns(df, self.fields_group)
+        df[cols] = df[cols].clip(lower=self.lower, upper=self.upper)
+        return df
+
+
 class HashStockFormat(Processor):
     """Process the storage of from df into hasing stock format"""
 

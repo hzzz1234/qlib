@@ -23,9 +23,9 @@ class Expression(abc.ABC):
         - period time is designed for Point-in-time database.  For example, the period time maybe 2014Q4, its value can observed for multiple times(different value may be observed at different time due to amendment).
     """
     @property
-    def require_cs_info(self):
+    def is_cs(self):
         """
-        Whether the expression requires CS info.
+        Whether the expression is CS operator.
         """
         return False
 
@@ -192,39 +192,24 @@ class Expression(abc.ABC):
         """
         from .cache import H  # pylint: disable=C0415
 
+        # cache
+        cache_key = str(self), instrument, start_index, end_index, *args
+        if cache_key in H["f"]:
+            return H["f"][cache_key]
         if start_index is not None and end_index is not None and start_index > end_index:
             raise ValueError("Invalid index range: {} {}".format(start_index, end_index))
-
-        # cache
-        # if self.require_cs_info:
-        #     cache_key = str(self), instrument, *args
-        # else:
-        cache_key = str(self), instrument, start_index, end_index, *args
-        
-        # 查看fs和f是否有缓存
-        if cache_key in H["f"]:
-            cached_series = H["f"][cache_key]
-        elif H.has_shared_cache() and cache_key in H["fs"]:
-            cached_series = H["fs"][cache_key]
-            H["f"][cache_key] = cached_series
-        else:
-            cached_series = None
-
-        if cached_series is None:      
-            try:
-                series = self._load_internal(instrument, start_index, end_index, *args)
-            except Exception as e:
-                get_module_logger("data").debug(
-                    f"Loading data error: instrument={instrument}, expression={str(self)}, "
-                    f"start_index={start_index}, end_index={end_index}, args={args}. "
-                    f"error info: {str(e)}"
-                )
-                raise
-            series.name = str(self)
-            H["f"][cache_key] = series
-            return series
-        else:
-            return cached_series
+        try:
+            series = self._load_internal(instrument, start_index, end_index, *args)
+        except Exception as e:
+            get_module_logger("data").debug(
+                f"Loading data error: instrument={instrument}, expression={str(self)}, "
+                f"start_index={start_index}, end_index={end_index}, args={args}. "
+                f"error info: {str(e)}"
+            )
+            raise
+        series.name = str(self)
+        H["f"][cache_key] = series
+        return series
 
     @abc.abstractmethod
     def _load_internal(self, instrument, start_index, end_index, *args) -> pd.Series:
@@ -303,13 +288,5 @@ class ExpressionOps(Expression):
     This kind of feature will use operator for feature
     construction on the fly.
     """
-    def set_population(self, population):
-        if self.require_cs_info:
-            self.population = population
-
-        for _, member_var in vars(self).items():
-            if isinstance(member_var, ExpressionOps):
-                member_var.set_population(population)
-
     def get_direct_dependents(self) -> list:
         return [v for v in self.__dict__.values() if isinstance(v, Expression)]

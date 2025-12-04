@@ -7,6 +7,7 @@ from __future__ import print_function
 
 import numpy as np
 import pandas as pd
+from abc import abstractmethod
 
 from typing import Union, List, Type
 from scipy.stats import percentileofscore
@@ -2130,76 +2131,31 @@ class XSectionOperator(ElemOperator):
     Expression
         a feature instance with cross section operation of input feature
     """
-    producer_instrument = {}
-
-    def set_population(self, population):
-        super(XSectionOperator, self).set_population(population)
-        population_sorted = sorted(population)
-        if str(self) not in self.producer_instrument:
-            self.producer_instrument[str(self)] = population_sorted[
-                len(self.producer_instrument) % len(population_sorted)
-            ]
-
+    @abstractmethod
     def _process_df(self, df, **_) -> pd.DataFrame:
         raise NotImplementedError("This function must be implemented in your newly defined feature")
         
     def _load_internal(self, instrument, start_index, end_index, *args) -> pd.Series:
         from .cache import H  # pylint: disable=C0415
 
-        cache_key = str(self), instrument, start_index, end_index, *args
+        return H["cs_f"].get(str(self), instrument)
 
-        if cache_key not in H["fs"]:
-            # get_module_logger(self.__class__.__name__).info(f"Acquiring lock {id(H['fs'].locks[str(self)])} for {str(self)} in {os.getpid()}")
-            H["cs_rlock_dict"][str(self)].acquire()
-            try:
-                if cache_key not in H["fs"]:
-                    # get_module_logger(self.__class__.__name__).info(f"calculating: {str(self)} for instrument {instrument}")
-                    df, inst_ranges = self._load_all_instruments(start_index, end_index, *args)
-                    df = self._process_df(df)
+    def _load_all_instruments(self, data, *args) -> pd.DataFrame:
+        col_name = str(self.feature)
+        series_list = []
+        inst_ranges = {}
+        for inst, df in data.items():
+            if col_name in df and not df[col_name].empty:
+                df[col_name].name = inst
+                series_list.append(df[col_name])
+                inst_ranges[inst] = (df[col_name].index.min(), df[col_name].index.max())
 
-                    for inst in df.columns:
-                        inst_st, inst_ed = inst_ranges.get(inst, (None, None))
-                        inst_cache_key = str(self), inst, start_index, end_index, *args
-                        inst_st = start_index if inst_st is None else max(inst_st, start_index)
-                        inst_ed = end_index if inst_ed is None else min(inst_ed, end_index)
-
-                        H["fs"][inst_cache_key] = df.loc[inst_st:inst_ed, inst]
-                # else:
-                #     get_module_logger(self.__class__.__name__).info(f"cache hit after waiting: {str(self)}")
-            finally:
-                # get_module_logger(self.__class__.__name__).info(f"Release lock {id(H['fs'].locks[str(self)])} for {str(self)} in {os.getpid()}")
-                H["cs_rlock_dict"][str(self)].release()
-
-        return H["fs"][cache_key]
-
-    def _load_all_instruments(self, start_index, end_index, *args) -> pd.DataFrame:
-        if isinstance(getattr(self, "population"), dict):
-
-            def mask_data(series, spans):
-                if bool(spans) and not series.empty:
-                    mask = np.zeros(len(series), dtype=bool)
-                    for begin, end in spans:
-                        mask |= (series.index >= begin) & (series.index <= end)
-                    series = series.copy()
-                    series[~mask] = np.nan
-                return series
-
-            sub_features = [
-                mask_data(self.feature.load(inst, start_index, end_index, *args).rename(inst), spans)
-                for inst, spans in getattr(self, "population", {}).items()
-            ]
-        else:
-            sub_features = [
-                self.feature.load(inst, start_index, end_index, *args).rename(inst)
-                for inst in getattr(self, "population", [])
-            ]
-        mydf = pd.concat([s for s in sub_features if not s.empty], axis=1, join="outer", sort=True)
-        inst_ranges = {s.name: (s.index.min(), s.index.max()) for s in sub_features if not s.empty}
+        mydf = pd.concat(series_list, axis=1, join="outer", sort=True)
 
         return mydf, inst_ranges
 
     @property
-    def require_cs_info(self):
+    def is_cs(self):
         return True
 
 class CSRank(XSectionOperator):
@@ -2236,6 +2192,9 @@ class CSBin(XSectionOperator):
         self.N_BINS = N_BINS
         super().__init__(feature)
 
+    def __str__(self):
+        return "{}({},{})".format(type(self).__name__, self.feature, self.N_BINS)
+
     def _process_df(self, df, **_) -> pd.DataFrame:
         def row_equal_width_cut(row):
             """
@@ -2255,6 +2214,117 @@ class CSBin(XSectionOperator):
             return binned_labels + 1
 
         return df.apply(row_equal_width_cut, axis=1)
+
+class CSRankGroupByCol(XSectionOperator):
+    """Cross section rank within groups defined by columns
+    
+    This operator performs ranking within groups. The groups are defined by the values
+    of specified columns in the DataFrame. Within each group, percentile ranking is applied.
+    
+    Parameters
+    ----------
+    feature : Expression
+        feature instance for ranking
+    groupby_feature : Expression
+        feature instance for groupby
+    
+    Returns
+    ----------
+    Expression
+        a feature instance with cross section rank within groups
+        
+    Example
+    -------
+    If you have a DataFrame with columns representing different stocks and you want to 
+    rank them within industry groups:
+    CSRankGroupByCol($close, $industry)
+    """
+    def __init__(self, feature, groupby_feature):
+        self.feature = feature
+        self.groupby_feature = groupby_feature
+        super().__init__(feature)
+    
+    def __str__(self):
+        # dynamic generate the string
+        return "{}({},{})".format(type(self).__name__, self.feature, self.groupby_feature)
+
+    def _load_all_instruments(self, data, *args) -> pd.DataFrame:
+        """
+        Load data from all instruments and prepare group columns.
+        
+        This method extends the base implementation to also load group column data.
+        The group columns are expected to be accessible via the feature loading mechanism.
+        
+        Parameters
+        ----------
+        data : Dict of pd.Series
+            Dict of series {instrument: pd.DataFrame, ...}
+        args*: 
+            
+        Returns
+        -------
+        tuple
+            (mydf, inst_ranges) where:
+            - mydf: pd.DataFrame, multi-indexed by (datetime, instrument), eg, [(datetime1, inst1), (datetime1, inst2), ...]
+            - inst_ranges: dict mapping instrument to (start_date, end_date)
+        """
+        val_col_name = str(self.feature)
+        groupby_col_name = str(self.groupby_feature)
+        datas = []
+        inst_ranges = {}
+        for inst, df in data.items():
+            if val_col_name in df and not df[val_col_name].empty and groupby_col_name in df and not df[groupby_col_name].empty:
+                N = len(df)
+                instrument_array = [inst] * N
+                inst_ranges[inst] = (df.index.min(), df.index.max())
+                new_multi_index = pd.MultiIndex.from_arrays(
+                    [df.index, instrument_array],  # 原始索引在前 (0级)，固定值在后 (1级)
+                    names=[df.index.name, "instrument"]
+                )
+                df.index = new_multi_index
+                datas.append(df)
+                
+
+        # construct multi-index
+        mydf = pd.concat(datas)
+        return mydf, inst_ranges
+    
+    def _process_df(self, df, **kwargs) -> pd.DataFrame:
+        """
+        Process the dataframe by ranking within groups.
+        
+        Groups are defined by both the index (timestamp) and group_cols.
+        For each timestamp, instruments are grouped by group_cols values,
+        and ranking is performed within each group.
+        
+        Parameters
+        ----------
+        df : pd.DataFrame, multi-indexed by (index, instrument) 
+        and columns are value and group_cols,eg. 
+                         value group_col1 group_col2
+        index instrument 
+        0        stock1   1    1          1
+        1        stock1   2    1          2
+        2        stock1   3    2          3
+        0        stock2   1    1          1
+        1        stock2   2    1          2
+        2        stock2   3    2          3
+            
+        Returns
+        -------
+        pd.DataFrame
+                stock1 stock2 ...    
+        index
+        0        0.1    0.2
+        1        0.3    0.4
+        """
+        group_keys = [df.index.get_level_values(0)]
+        group_keys.append(df[str(self.groupby_feature)])
+        df['rank'] = df.groupby(group_keys).rank(pct=True)
+        result_df = df['rank'].unstack(level=1)
+        return result_df
+
+
 
 #################### Operator which only support data with time index ####################
 # Convention
@@ -2297,7 +2367,7 @@ class TResample(ElemOperator):
             else:
                 return getattr(series.resample(self.freq), self.func)()
 
-CSOpsList = [CSRank]
+CSOpsList = [CSRank, CSBin, CSRankGroupByCol]
 TOpsList = [TResample]
 AdditionList = [DecayLinear, SignedPower]
 FutureOpsList = [FutureRolling, FutureSum, FutureMed, FutureMean, FutureVar, FutureStd, FutureMax, FutureMin]

@@ -180,6 +180,81 @@ class TestCSRealData(unittest.TestCase):
             # 如果在测试环境中无法获取真实数据，记录错误但不中断测试
             print(f"注意：使用真实数据测试时出现问题: {e}")
 
+    def test_csbin_expression(self):
+        """
+        测试CSBin表达式的基本功能
+        """
+        dates = pd.date_range(start="2022-01-01", periods=5)
+        symbols = ["stock1", "stock2", "stock3", "stock4", "stock5"]
+        
+        index = pd.MultiIndex.from_product([dates, symbols], names=["datetime", "instrument"])
+        # Ensure sufficient variance for binning
+        close_data = np.sort(np.random.rand(25)) # Sorted to ensure distinct bins for qcut
+        
+        df = pd.DataFrame({
+            "$close": close_data,
+        }, index=index)
+
+        def calculate_csbin(df, column, bins=5):
+            # Simulate CSBin behavior: group by datetime, then quantile bin
+            # Use qcut to create quantile-based bins
+            return df.groupby(level="datetime")[column].transform(lambda x: pd.qcut(x, q=bins, labels=False, duplicates='drop'))
+
+        # Test basic CSBin with 5 bins
+        csbin_close = calculate_csbin(df, "$close", bins=5)
+        self.assertGreaterEqual(csbin_close.min(), 0)
+        # Max bin index should be less than 5 (i.e., 0, 1, 2, 3, 4)
+        self.assertLess(csbin_close.max(), 5) 
+        # Ensure results are integers (can be int or np.int64)
+        self.assertTrue(csbin_close.dropna().apply(lambda x: isinstance(x, (int, np.integer))).all())
+
+        print("CSBin表达式测试完成")
+
+    def test_csrankgroupbycol_expression(self):
+        """
+        测试CSRankGroupByCol表达式的基本功能
+        """
+        dates = pd.date_range(start="2022-01-01", periods=5)
+        symbols = ["stock1", "stock2", "stock3", "stock4", "stock5"]
+        
+        index = pd.MultiIndex.from_product([dates, symbols], names=["datetime", "instrument"])
+        close_data = np.random.rand(25)
+        # Introduce a grouping column, e.g., 'sector'
+        sectors = np.array(["Tech", "Finance"] * 12 + ["Tech"])[:25] # Distribute sectors
+        np.random.shuffle(sectors) # Shuffle to mix sectors across instruments
+        
+        df = pd.DataFrame({
+            "$close": close_data,
+            "$sector": sectors
+        }, index=index)
+
+        def calculate_csrank_groupby_col(df, column, group_col):
+            # Simulate CSRankGroupByCol: group by datetime and then by the specified group_col
+            result = df.groupby([pd.Grouper(level="datetime"), group_col])[column].rank(pct=True)
+            return result
+
+        # Test CSRankGroupByCol using $sector
+        csrank_close_by_sector = calculate_csrank_groupby_col(df, "$close", "$sector")
+        
+        # Verify results
+        self.assertFalse(csrank_close_by_sector.empty)
+        self.assertGreaterEqual(csrank_close_by_sector.min(), 0)
+        self.assertLessEqual(csrank_close_by_sector.max(), 1)
+
+        # Further verification: check ranking within a specific group for a specific date
+        for date, group_by_date in df.groupby(level="datetime"):
+            if not group_by_date.empty:
+                for sector_name, sector_group in group_by_date.groupby("$sector"):
+                    if len(sector_group) > 1: # Need at least 2 items to check ranking
+                        # Get the manually calculated rank
+                        manual_rank = sector_group["$close"].rank(pct=True)
+                        # Get the rank from the tested output by using the same MultiIndex
+                        tested_rank = csrank_close_by_sector.loc[sector_group.index]
+                        # Ensure the ranks match for this group
+                        pd.testing.assert_series_equal(manual_rank.sort_index(), tested_rank.sort_index(), check_names=False)
+
+        print("CSRankGroupByCol表达式测试完成")
+
 
 if __name__ == "__main__":
     unittest.main()

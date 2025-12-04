@@ -169,8 +169,7 @@ class MemCache:
         self.__calendar_mem_cache = klass(size_limit)
         self.__instrument_mem_cache = klass(size_limit)
         self.__feature_mem_cache = klass(size_limit)
-        self.__shared_feature_mem_cache = None
-        self.__cs_rlock_dict = None
+        self.__cs_feature_shared_mem_cache = None
 
     def __getitem__(self, key):
         if key == "c":
@@ -179,10 +178,8 @@ class MemCache:
             return self.__instrument_mem_cache
         elif key == "f":
             return self.__feature_mem_cache
-        elif key == "fs":
-            return self.__shared_feature_mem_cache
-        elif key == "cs_rlock_dict":
-            return self.__cs_rlock_dict
+        elif key == "cs_f":
+            return self.__cs_feature_shared_mem_cache
         else:
             raise KeyError("Unknown memcache unit")
 
@@ -190,15 +187,12 @@ class MemCache:
         self.__calendar_mem_cache.clear()
         self.__instrument_mem_cache.clear()
         self.__feature_mem_cache.clear()
-
+        
     def set_shared_cache(self, shared_cache):
-        self.__shared_feature_mem_cache = shared_cache
-    
-    def set_rlock_dict(self, rlock_dict):
-        self.__cs_rlock_dict = rlock_dict
+        self.__cs_feature_shared_mem_cache = shared_cache
 
     def has_shared_cache(self):
-        return self.__shared_feature_mem_cache is not None
+        return self.__cs_feature_shared_mem_cache is not None
 
 class MemCacheExpire:
     CACHE_EXPIRE = C.mem_cache_expire
