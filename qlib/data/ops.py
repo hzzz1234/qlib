@@ -2138,7 +2138,11 @@ class XSectionOperator(ElemOperator):
     def _load_internal(self, instrument, start_index, end_index, *args) -> pd.Series:
         from .cache import H  # pylint: disable=C0415
 
-        return H["cs_f"].get(str(self), instrument)
+        result = H["cs_f"].get(str(self), instrument)
+        if result is None:
+            return pd.Series()
+        return result
+            
 
     def _load_all_instruments(self, data, *args) -> pd.DataFrame:
         col_name = str(self.feature)
