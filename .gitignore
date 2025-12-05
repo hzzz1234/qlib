@@ -50,3 +50,7 @@ tags
 ./pretrain
 .idea/
 .aider*
+
+.DS_Store
+
+uv.lock

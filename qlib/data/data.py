@@ -340,6 +340,48 @@ class FeatureProvider(abc.ABC):
 
 class PITProvider(abc.ABC):
     @abc.abstractmethod
+    def period_feature_all(
+        self,
+        instrument,
+        field,
+        start_index: int,
+        end_index: int,
+        freq: str,
+        period: Optional[int] = None,
+    ) -> pd.Series:
+        """
+        get the historical periods data series between `start_index` and `end_index`
+
+        Parameters
+        ----------
+        start_index: int
+            start_index is a relative index to the latest period to cur_time
+
+        end_index: int
+            end_index is a relative index to the latest period to cur_time
+            in most cases, the start_index and end_index will be a non-positive values
+            For example, start_index == -3 end_index == 0 and current period index is cur_idx,
+            then the data between [start_index + cur_idx, end_index + cur_idx] will be retrieved.
+
+        period: Optional[int] = None
+            the period of the data
+
+        Returns
+        -------
+        pd.Series
+            The index will be integers to indicate the periods of the data
+            An typical examples will be
+            TODO
+
+        Raises
+        -----
+        FileNotFoundError
+            This exception will be raised if the queried data do not exist.
+
+        """
+        raise NotImplementedError("Subclass of PITProvider must implement `period_feature_range` method")
+
+    @abc.abstractmethod
     def period_feature(
         self,
         instrument,
@@ -600,6 +642,8 @@ class DatasetProvider(abc.ABC):
             
             # Add dependent features to queue
             for dependent in feature.get_direct_dependents():
+                if str(dependent).startswith("$$"):
+                    continue
                 feature_queue.append((str(dependent), dependent, window, next_level))
         
         return feature_extended_windows, level_features, level_cs_features
@@ -625,49 +669,28 @@ class DatasetProvider(abc.ABC):
 
         reversed_levels = sorted(level_features, reverse=True)
 
-        if len(reversed_levels) > 1:
-            if C["joblib_backend"] != "multiprocessing":  # pylint: disable=R1702
-                    raise RuntimeError("only multiprocessing backend is supported for cross-section data")
+        if C["joblib_backend"] != "multiprocessing":  # pylint: disable=R1702
+                raise RuntimeError("only multiprocessing backend is supported for cross-section data")
 
-            # Create CS feature shared memory cache
-            from .shared_memory_cache import CSFeatureSharedMemCache
-            cs_cache = CSFeatureSharedMemCache()
-            try:
-                get_module_logger("data").info("Starting cross-section feature computation")
-                get_module_logger("data").info(f"num cs_levels: {len(reversed_levels)}")
+        # Create CS feature shared memory cache
+        from .shared_memory_cache import CSFeatureSharedMemCache
+        cs_cache = CSFeatureSharedMemCache()
+        try:
+            get_module_logger("data").info("Starting cross-section feature computation")
+            get_module_logger("data").info(f"num cs_levels: {len(reversed_levels) - 1}")
 
-                for level in reversed_levels[:-1]:
-                    features = level_features[level]
-                    get_module_logger("data").info(f"Computing CS features for level {level}: {list(features)}")
+            for level in reversed_levels[:-1]:
+                features = level_features[level]
+                get_module_logger("data").info(f"Computing CS features for level {level}: {list(features)}")
 
-                    # compute level sub features
-                    inst_l = []
-                    task_l = []
-                    for inst, spans in it:
-                        inst_l.append(inst)
-                        task_l.append(
-                            delayed(DatasetProvider.inst_intermediate_calculator)(
-                                inst, start_time, end_time, freq, features, spans, C, inst_processors, cs_cache
-                            )
-                        )
-
-                    data = dict(
-                        zip(
-                            inst_l,
-                            ParallelExt(n_jobs=workers, backend=C.joblib_backend, maxtasksperchild=C.maxtasksperchild)(task_l),
-                        )
-                    )
-
-                    # compute level cross-section features        
-                    DatasetProvider.cross_section_calculator(data, level_cs_features[level], cs_cache)
-        
+                # compute level sub features
                 inst_l = []
                 task_l = []
                 for inst, spans in it:
                     inst_l.append(inst)
                     task_l.append(
-                        delayed(DatasetProvider.inst_calculator)(
-                            inst, start_time, end_time, freq, level_features[0], spans, C, inst_processors, cs_cache
+                        delayed(DatasetProvider.inst_intermediate_calculator)(
+                            inst, start_time, end_time, freq, features, spans, C, inst_processors, cs_cache
                         )
                     )
 
@@ -678,25 +701,45 @@ class DatasetProvider(abc.ABC):
                     )
                 )
 
-                new_data = dict()
-                for inst in sorted(data.keys()):
-                    if len(data[inst]) > 0:
-                        # NOTE: Python version >= 3.6; in versions after python3.6, dict will always guarantee the insertion order
-                        new_data[inst] = data[inst]
-
-                if len(new_data) > 0:
-                    data = pd.concat(new_data, names=["instrument"], sort=False)
-                    data = DiskDatasetCache.cache_to_origin_data(data, column_names)
-                else:
-                    data = pd.DataFrame(
-                        index=pd.MultiIndex.from_arrays([[], []], names=("instrument", "datetime")),
-                        columns=column_names,
-                        dtype=C.float_type,
+                # compute level cross-section features        
+                DatasetProvider.cross_section_calculator(data, level_cs_features[level], cs_cache)
+        
+            inst_l = []
+            task_l = []
+            for inst, spans in it:
+                inst_l.append(inst)
+                task_l.append(
+                    delayed(DatasetProvider.inst_calculator)(
+                        inst, start_time, end_time, freq, level_features[0], spans, C, inst_processors, cs_cache
                     )
+                )
 
-                return data
-            finally:
-                cs_cache.cleanup()
+            data = dict(
+                zip(
+                    inst_l,
+                    ParallelExt(n_jobs=workers, backend=C.joblib_backend, maxtasksperchild=C.maxtasksperchild)(task_l),
+                )
+            )
+
+            new_data = dict()
+            for inst in sorted(data.keys()):
+                if len(data[inst]) > 0:
+                    # NOTE: Python version >= 3.6; in versions after python3.6, dict will always guarantee the insertion order
+                    new_data[inst] = data[inst]
+
+            if len(new_data) > 0:
+                data = pd.concat(new_data, names=["instrument"], sort=False)
+                data = DiskDatasetCache.cache_to_origin_data(data, column_names)
+            else:
+                data = pd.DataFrame(
+                    index=pd.MultiIndex.from_arrays([[], []], names=("instrument", "datetime")),
+                    columns=column_names,
+                    dtype=C.float_type,
+                )
+
+            return data
+        finally:
+            cs_cache.cleanup()
         
     @staticmethod
     def cross_section_calculator(data, cs_features, cs_cache):
@@ -864,7 +907,6 @@ class LocalInstrumentProvider(InstrumentProvider, ProviderBackendMixin):
             return list(_instruments_filtered)
         return _instruments_filtered
 
-
 class LocalFeatureProvider(FeatureProvider, ProviderBackendMixin):
     """Local feature data provider class
 
@@ -886,6 +928,51 @@ class LocalFeatureProvider(FeatureProvider, ProviderBackendMixin):
 class LocalPITProvider(PITProvider):
     # TODO: Add PIT backend file storage
     # NOTE: This class is not multi-threading-safe!!!!
+    def period_feature_all(self, instrument, field, start_index, end_index, freq, period=None):
+        DATA_RECORDS = [
+            ("date", C.pit_record_type["date"]),
+            ("period", C.pit_record_type["period"]),
+            ("value", C.pit_record_type["value"]),
+            ("_next", C.pit_record_type["index"]),
+        ]
+        VALUE_DTYPE = C.pit_record_type["value"]
+
+        field = str(field).lower()[2:]
+        instrument = code_to_fname(instrument)
+
+        if not field.endswith("_q") and not field.endswith("_a"):
+            raise ValueError("period field must ends with '_q' or '_a'")
+
+        index_path = C.dpm.get_data_uri() / "financial" / instrument.lower() / f"{field}.index"
+        data_path = C.dpm.get_data_uri() / "financial" / instrument.lower() / f"{field}.data"
+        if not (index_path.exists() and data_path.exists()):
+            # raise FileNotFoundError("No file is found.")
+            get_module_logger("data").warning(f"{instrument} pit {field} no file is found.")
+            return pd.Series()
+
+        datas = np.fromfile(data_path, dtype=DATA_RECORDS)
+
+        _calendar = Cal.calendar(freq=freq)
+
+        data_indexes = [pd.to_datetime(datas[i][0], format="%Y%m%d") for i in range(len(datas))]
+        data_values = [datas[i][2] for i in range(len(datas))]
+        data_series = pd.Series(data_values, index=data_indexes)
+
+        if period is not None:
+            data_series = data_series.shift(period)
+
+        # concat data_series index and _calendar and remove duplicates and sort
+        new_calendar_index = np.unique(np.concatenate([data_indexes, _calendar]))
+        data_series = data_series.reindex(new_calendar_index)
+        # ffill to fill missing values
+        data_series = data_series.ffill()
+        # slice to the calendar range
+        data_series = data_series[_calendar[0]:_calendar[-1]]
+        # convert to index from pd.Timestamp to index, map to Calendar index
+        _, _, start_index, end_index = Cal.locate_index(_calendar[0], _calendar[-1], freq=freq)
+        data_series.index = pd.RangeIndex(start_index, end_index + 1)
+
+        return data_series
 
     def period_feature(self, instrument, field, start_index, end_index, cur_time, period=None):
         if not isinstance(cur_time, pd.Timestamp):
