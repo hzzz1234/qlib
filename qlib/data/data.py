@@ -640,11 +640,12 @@ class DatasetProvider(abc.ABC):
             else:
                 next_level = cs_level
             
-            # Add dependent features to queue
-            for dependent in feature.get_direct_dependents():
-                if str(dependent).startswith("$$"):
-                    continue
-                feature_queue.append((str(dependent), dependent, window, next_level))
+            if next_level > 0:
+                # Add dependent features to queue
+                for dependent in feature.get_direct_dependents():
+                    if str(dependent).startswith("$$"):
+                        continue
+                    feature_queue.append((str(dependent), dependent, window, next_level))
         
         return feature_extended_windows, level_features, level_cs_features
 
@@ -710,7 +711,7 @@ class DatasetProvider(abc.ABC):
                 inst_l.append(inst)
                 task_l.append(
                     delayed(DatasetProvider.inst_calculator)(
-                        inst, start_time, end_time, freq, level_features[0], spans, C, inst_processors, cs_cache
+                        inst, start_time, end_time, freq, column_names, spans, C, inst_processors, cs_cache
                     )
                 )
 
