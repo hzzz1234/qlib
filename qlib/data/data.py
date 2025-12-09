@@ -711,7 +711,7 @@ class DatasetProvider(abc.ABC):
                 inst_l.append(inst)
                 task_l.append(
                     delayed(DatasetProvider.inst_calculator)(
-                        inst, start_time, end_time, freq, column_names, spans, C, inst_processors, cs_cache
+                        inst, start_time, end_time, freq, normalize_column_names, spans, C, inst_processors, cs_cache
                     )
                 )
 
