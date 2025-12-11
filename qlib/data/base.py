@@ -284,7 +284,7 @@ class PFeature(Feature):
     def _load_internal(self, instrument, start_index, end_index, freq, period):
         from .data import PITD  # pylint: disable=C0415
 
-        return PITD.period_feature_all(instrument, str(self), start_index, end_index, freq, period)
+        return PITD.period_feature_raw(instrument, str(self), freq, period)
 
 
 

@@ -18,6 +18,8 @@ import pandas as pd
 from qlib.data.ops import ElemOperator
 from qlib.log import get_module_logger
 from .data import Cal
+from .ops import PFeature
+from .base import ExpressionOps
 
 class P(ElemOperator):
     # def _load_internal(self, instrument, start_index, end_index, freq):
@@ -47,9 +49,25 @@ class P(ElemOperator):
     #         resample_data, index=pd.RangeIndex(start_index, end_index + 1), dtype="float32", name=str(self)
     #     )
     #     return resample_series
-    def _load_internal(self, instrument, start_index, end_index, freq):
+    def _load_feature(self, instrument, start_index, end_index, freq):
         return self.feature.load(instrument, start_index, end_index, freq, None)
-        
+
+    def _load_internal(self, instrument, start_index, end_index, freq):
+        _calendar = Cal.calendar(freq=freq)
+        data_series = self._load_feature(instrument, 0, len(_calendar), freq)
+        if data_series.empty:
+            return data_series
+         # concat data_series index and _calendar and remove duplicates and sort
+        new_calendar_index = np.unique(np.concatenate([data_series.index.tolist(), _calendar]))
+        data_series = data_series.reindex(new_calendar_index)
+        # ffill to fill missing values
+        data_series = data_series.ffill()
+        # slice to the calendar range
+        start_time = _calendar[start_index]
+        end_time = _calendar[end_index]
+        data_series = data_series[start_time:end_time]
+        data_series.index = pd.RangeIndex(start_index, end_index + 1)
+        return data_series
 
     # def _load_feature(self, instrument, start_index, end_index, cur_time):
     #     return self.feature.load(instrument, start_index, end_index, cur_time)
@@ -62,7 +80,6 @@ class P(ElemOperator):
         # The period data will collapse as a normal feature. So no extending and looking back
         return 0, 0
 
-
 class PRef(P):
     def __init__(self, feature, period):
         super().__init__(feature)
@@ -72,7 +89,67 @@ class PRef(P):
         # return f"{super().__str__()}[{self.period}]"
         return f"PRef({str(self.feature)},{self.period})"
 
-    # def _load_feature(self, instrument, start_index, end_index, cur_time):
-    #     return self.feature.load(instrument, start_index, end_index, cur_time, self.period)
+    def _load_feature(self, instrument, start_index, end_index, cur_time):
+        return self.feature.load(instrument, start_index, end_index, cur_time, self.period)
+    # def _load_internal(self, instrument, start_index, end_index, freq):
+    #     return self.feature.load(instrument, start_index, end_index, freq, self.period)
+
+#################### Operator which support factor ####################
+class PreFactor(ExpressionOps):
+    def __init__(self, feature, feature_factora, feature_factorb):
+        self.feature = feature
+        self.feature_factora = feature_factora
+        self.feature_factorb = feature_factorb
+
+    def __str__(self):
+        return "PreFactor({},{},{})".format(self.feature, self.feature_factora, self.feature_factorb)
+
     def _load_internal(self, instrument, start_index, end_index, freq):
-        return self.feature.load(instrument, start_index, end_index, freq, self.period)
+        _calendar = Cal.calendar(freq=freq)
+        # load data
+        series = self.feature.load(instrument, 0, len(_calendar), freq)
+        if series.empty:
+            return series
+
+        if isinstance(self.feature_factora, PFeature) and isinstance(self.feature_factorb, PFeature):
+            series_factora = self.feature_factora.load(instrument, 0, len(_calendar), freq, None)
+            series_factorb = self.feature_factorb.load(instrument, 0, len(_calendar), freq, None)
+            if len(series_factora)>0 and len(series_factora) == len(series_factorb):
+                
+                series_factora = series_factora[(series_factora.index>=_calendar[0]) & (series_factora.index<=_calendar[-1])]
+                series_factora = series_factora.reindex(_calendar)
+                series_factora.index = pd.RangeIndex(0, len(_calendar))
+                series_factorb = series_factorb[(series_factorb.index>=_calendar[0]) & (series_factorb.index<=_calendar[-1])]
+                series_factorb = series_factorb.reindex(_calendar)
+                series_factorb.index = pd.RangeIndex(0, len(_calendar))
+
+                # shift 1 pos to align the index
+                series_factora = series_factora.shift(-1)
+                series_factorb = series_factorb.shift(-1)
+
+                # calculate the factor
+                factor = (series - series_factorb) / series_factora / series
+                factor.iloc[-1] = 1
+                # Take out non-null values, 
+                # multiply them in reverse order, 
+                # and then put them back in the original index order.
+                # last bfill to make sure the last value is 1
+                factor = factor[factor.notnull()]
+                factor = factor[::-1]
+                factor = factor.cumprod()
+                factor = factor[::-1]
+                factor = factor.reindex(pd.RangeIndex(0, len(_calendar)))
+                factor = factor.bfill()
+                max_start_index = max(start_index, series.index[0])
+                min_end_index = min(end_index, series.index[-1])
+                return factor[max_start_index:min_end_index+1]
+        
+        return pd.Series(np.ones_like(series), index=series.index)
+
+    def get_longest_back_rolling(self):
+        # The period data will collapse as a normal feature. So no extending and looking back
+        return 0
+
+    def get_extended_window_size(self):
+        # The period data will collapse as a normal feature. So no extending and looking back
+        return 0, 0
