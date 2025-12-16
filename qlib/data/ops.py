@@ -782,6 +782,12 @@ class If(ExpressionOps):
             series_right = self.feature_right.load(instrument, start_index, end_index, *args)
         else:
             series_right = self.feature_right
+
+        if hasattr(series_left, "reindex"):
+            series_left = series_left.reindex(series_cond.index)
+        if hasattr(series_right, "reindex"):
+            series_right = series_right.reindex(series_cond.index)
+        
         series = pd.Series(np.where(series_cond, series_left, series_right), index=series_cond.index)
         return series
 
