@@ -38,6 +38,7 @@ from ..utils import (
     time_to_slc_point,
     read_period_data,
     get_period_list,
+    get_date_by_shift,
 )
 from ..utils.paral import ParallelExt
 from .ops import Operators  # pylint: disable=W0611  # noqa: F401
@@ -679,12 +680,12 @@ class DatasetProvider(abc.ABC):
             else:
                 next_level = cs_level
             
-            if next_level > 0:
-                # Add dependent features to queue
-                for dependent in feature.get_direct_dependents():
-                    if str(dependent).startswith("$$"):
-                        continue
-                    feature_queue.append((str(dependent), dependent, window, next_level))
+            # if next_level > 0:
+            # Add dependent features to queue
+            for dependent in feature.get_direct_dependents():
+                if str(dependent).startswith("$$"):
+                    continue
+                feature_queue.append((str(dependent), dependent, window, next_level))
         
         return feature_extended_windows, level_features, level_cs_features
 
@@ -730,7 +731,7 @@ class DatasetProvider(abc.ABC):
                     inst_l.append(inst)
                     task_l.append(
                         delayed(DatasetProvider.inst_intermediate_calculator)(
-                            inst, start_time, end_time, freq, features, spans, C, inst_processors, cs_cache
+                            inst, start_time, end_time, freq, features, spans, C, inst_processors, cs_cache, feature_extended_windows, level
                         )
                     )
 
@@ -750,7 +751,7 @@ class DatasetProvider(abc.ABC):
                 inst_l.append(inst)
                 task_l.append(
                     delayed(DatasetProvider.inst_calculator)(
-                        inst, start_time, end_time, freq, normalize_column_names, spans, C, inst_processors, cs_cache
+                        inst, start_time, end_time, freq, normalize_column_names, spans, C, inst_processors, cs_cache, feature_extended_windows
                     )
                 )
 
@@ -794,7 +795,7 @@ class DatasetProvider(abc.ABC):
                 cs_cache.set(cs_feature, inst, cs_df.loc[inst_st:inst_ed, inst])
 
     @staticmethod
-    def inst_intermediate_calculator(inst, start_time, end_time, freq, column_names, spans=None, g_config=None, inst_processors=[], cs_cache=None):
+    def inst_intermediate_calculator(inst, start_time, end_time, freq, column_names, spans=None, g_config=None, inst_processors=[], cs_cache=None, feature_extended_windows={}, level=1):
         """
         Calculate the expressions for **one** instrument, return a df result.
         If the expression has been calculated before, load from cache.
@@ -813,13 +814,14 @@ class DatasetProvider(abc.ABC):
         obj = dict()
         for field in column_names:
             #  The client does not have expression provider, the data will be loaded from cache using static method.
-            obj[field] = ExpressionD.expression(inst, field, start_time, end_time, freq)
+            feature = ExpressionD.get_expression_instance(field)
+            obj[field] = ExpressionD.expression(inst, field, start_time, end_time, freq, extended_window=feature_extended_windows.get(str(feature), (0, 0)), level=level)
 
         data = pd.DataFrame(obj)
         return data
 
     @staticmethod
-    def inst_calculator(inst, start_time, end_time, freq, column_names, spans=None, g_config=None, inst_processors=[], cs_cache=None):
+    def inst_calculator(inst, start_time, end_time, freq, column_names, spans=None, g_config=None, inst_processors=[], cs_cache=None, feature_extended_windows={}, level=0):
         """
         Calculate the expressions for **one** instrument, return a df result.
         If the expression has been calculated before, load from cache.
@@ -839,7 +841,8 @@ class DatasetProvider(abc.ABC):
         for field in column_names:
             try:
                 #  The client does not have expression provider, the data will be loaded from cache using static method.
-                obj[field] = ExpressionD.expression(inst, field, start_time, end_time, freq)
+                feature = ExpressionD.get_expression_instance(field)
+                obj[field] = ExpressionD.expression(inst, field, start_time, end_time, freq, extended_window=feature_extended_windows.get(str(feature), (0, 0)), level=level)
             except KeyError as e:
                 get_module_logger("data").error(f"KeyError loading instrument={inst}, field={field}: {e}")
                 raise
@@ -1101,7 +1104,7 @@ class LocalExpressionProvider(ExpressionProvider):
         super().__init__()
         self.time2idx = time2idx
 
-    def expression(self, instrument, field, start_time=None, end_time=None, freq="day"):
+    def expression(self, instrument, field, start_time=None, end_time=None, freq="day", extended_window=(0, 0), level=0):
         expression = self.get_expression_instance(field)
         start_time = time_to_slc_point(start_time)
         end_time = time_to_slc_point(end_time)
@@ -1109,12 +1112,17 @@ class LocalExpressionProvider(ExpressionProvider):
         # Two kinds of queries are supported
         # - Index-based expression: this may save a lot of memory because the datetime index is not saved on the disk
         # - Data with datetime index expression: this will make it more convenient to integrating with some existing databases
+        lft_etd, rght_etd = extended_window
+        
         if self.time2idx:
             _, _, start_index, end_index = Cal.locate_index(start_time, end_time, freq=freq, future=False)
-            lft_etd, rght_etd = expression.get_extended_window_size()
+            # lft_etd, rght_etd = expression.get_extended_window_size()
             query_start, query_end = max(0, start_index - lft_etd), end_index + rght_etd
         else:
-            start_index, end_index = query_start, query_end = start_time, end_time
+            # start_index, end_index = query_start, query_end = start_time, end_time
+            start_index, end_index = pd.Timestamp(start_time), pd.Timestamp(end_time)
+            query_start = get_date_by_shift(start_time, -lft_etd, future=True)
+            query_end = get_date_by_shift(end_time, rght_etd, future=True)
 
         try:
             series = expression.load(instrument, query_start, query_end, freq)
@@ -1136,7 +1144,10 @@ class LocalExpressionProvider(ExpressionProvider):
         except TypeError:
             pass
         if not series.empty:
-            series = series.loc[start_index:end_index]
+            if level > 0:
+                series = series
+            else:
+                series = series.loc[start_index:end_index]
         return series
 
 
