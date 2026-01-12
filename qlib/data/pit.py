@@ -62,11 +62,10 @@ class P(ElemOperator):
         data_series = data_series.reindex(new_calendar_index)
         # ffill to fill missing values
         data_series = data_series.ffill()
+        data_series = data_series.dropna()
         # slice to the calendar range
-        start_time = _calendar[start_index]
-        end_time = _calendar[end_index]
-        data_series = data_series[start_time:end_time]
-        data_series.index = pd.RangeIndex(start_index, end_index + 1)
+        _, _, s_index, e_index = Cal.locate_index(data_series.index.min(), data_series.index.max(), freq, True)
+        data_series.index = pd.RangeIndex(s_index, e_index + 1)
         return data_series
 
     # def _load_feature(self, instrument, start_index, end_index, cur_time):
