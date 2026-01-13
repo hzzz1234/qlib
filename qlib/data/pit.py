@@ -64,7 +64,7 @@ class P(ElemOperator):
         data_series = data_series.ffill()
         data_series = data_series.dropna()
         # slice to the calendar range
-        _, _, s_index, e_index = Cal.locate_index(data_series.index.min(), data_series.index.max(), freq, True)
+        _, _, s_index, e_index = Cal.locate_index(data_series.index.min(), data_series.index.max(), freq)
         max_start_index = max(s_index, start_index)
         min_end_index = min(e_index, end_index)
         start_time = _calendar[max_start_index]
