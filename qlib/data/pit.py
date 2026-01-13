@@ -65,7 +65,12 @@ class P(ElemOperator):
         data_series = data_series.dropna()
         # slice to the calendar range
         _, _, s_index, e_index = Cal.locate_index(data_series.index.min(), data_series.index.max(), freq, True)
-        data_series.index = pd.RangeIndex(s_index, e_index + 1)
+        max_start_index = max(s_index, start_index)
+        min_end_index = min(e_index, end_index)
+        start_time = _calendar[max_start_index]
+        end_time = _calendar[min_end_index]
+        data_series = data_series.loc[start_time:end_time]
+        data_series.index = pd.RangeIndex(max_start_index, min_end_index+1)
         return data_series
 
     # def _load_feature(self, instrument, start_index, end_index, cur_time):
