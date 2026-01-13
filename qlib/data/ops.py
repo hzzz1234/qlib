@@ -321,13 +321,10 @@ class NpPairOperator(PairOperator):
                 f"The length of series_left and series_right is different: ({len(series_left)}, {len(series_right)}), "
                 f"series_left is {str(self.feature_left)}, series_right is {str(self.feature_right)}. Please check the data"
             )
-            from .pit import P
-            if isinstance(self.feature_left, (P,)): 
-                # left feature remove redundant length
-                series_left = series_left.loc[series_left.index[0]:series_left.index[-1]]
-            if isinstance(self.feature_right, (P,)): 
-                # right feature remove redundant length
+            if series_left.index[0] >= series_right.index[0] and series_left.index[-1] <= series_right.index[-1]:
                 series_right = series_right.loc[series_left.index[0]:series_left.index[-1]]
+            elif series_right.index[0] >= series_left.index[0] and series_right.index[-1] <= series_left.index[-1]:
+                series_left = series_left.loc[series_right.index[0]:series_right.index[-1]]
         else:
             warning_info = (
                 f"Loading {instrument}: {str(self)}; np.{self.func}(series_left, series_right), "
