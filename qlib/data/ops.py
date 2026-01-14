@@ -321,10 +321,18 @@ class NpPairOperator(PairOperator):
                 f"The length of series_left and series_right is different: ({len(series_left)}, {len(series_right)}), "
                 f"series_left is {str(self.feature_left)}, series_right is {str(self.feature_right)}. Please check the data"
             )
-            if series_left.index[0] >= series_right.index[0] and series_left.index[-1] <= series_right.index[-1]:
-                series_right = series_right.loc[series_left.index[0]:series_left.index[-1]]
-            elif series_right.index[0] >= series_left.index[0] and series_right.index[-1] <= series_left.index[-1]:
-                series_left = series_left.loc[series_right.index[0]:series_right.index[-1]]
+            if len(series_left)>0 and len(series_right)>0:
+                if series_left.index[0] >= series_right.index[0] and series_left.index[-1] <= series_right.index[-1]:
+                    series_right = series_right.loc[series_left.index[0]:series_left.index[-1]]
+                elif series_right.index[0] >= series_left.index[0] and series_right.index[-1] <= series_left.index[-1]:
+                    series_left = series_left.loc[series_right.index[0]:series_right.index[-1]]
+            else:
+                if len(series_left)>0:
+                    # series_right fill nan
+                    series_right = series_right.reindex(series_left.index)
+                else:
+                    # series_left fill nan
+                    series_left = series_left.reindex(series_right.index)
         else:
             warning_info = (
                 f"Loading {instrument}: {str(self)}; np.{self.func}(series_left, series_right), "
