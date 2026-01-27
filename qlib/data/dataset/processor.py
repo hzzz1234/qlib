@@ -322,6 +322,34 @@ class CSZScoreNorm(Processor):
                 df[cols] = df[cols].groupby("datetime", group_keys=False).apply(self.zscore_func)
         return df
 
+class CSRank(Processor):
+    """
+    Cross Sectional Rank Normalization.
+    "Cross Sectional" is often used to describe data operations.
+    The operations across different stocks are often called Cross Sectional Operation.
+
+    For example, CSRank is an operation that grouping the data by each day and rank `across` all the stocks in each day.
+
+    Explanation about 3.46 & 0.5
+
+    .. code-block:: python
+
+        import numpy as np
+        import pandas as pd
+        x = np.random.random(10000)  # for any variable
+        x_rank = pd.Series(x).rank(pct=True)  # if it is converted to rank, it will be a uniform distributed
+
+    """
+
+    def __init__(self, fields_group=None):
+        self.fields_group = fields_group
+
+    def __call__(self, df):
+        # try not modify original dataframe
+        cols = get_group_columns(df, self.fields_group)
+        t = df[cols].groupby("datetime", group_keys=False).rank(pct=True)
+        df[cols] = t
+        return df
 
 class CSRankNorm(Processor):
     """
