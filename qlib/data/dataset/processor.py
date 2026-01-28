@@ -13,6 +13,7 @@ from ...utils.serial import Serializable
 from ...utils.paral import datetime_groupby_apply
 from qlib.data.inst_processor import InstProcessor
 from qlib.data import D
+from qlib.config import C
 
 
 def get_group_columns(df: pd.DataFrame, group: Union[Text, None]):
@@ -347,7 +348,7 @@ class CSRank(Processor):
     def __call__(self, df):
         # try not modify original dataframe
         cols = get_group_columns(df, self.fields_group)
-        t = df[cols].groupby("datetime", group_keys=False).rank(pct=True)
+        t = df[cols].groupby("datetime", group_keys=False).rank(pct=True).astype(C.float_type)
         df[cols] = t
         return df
 
