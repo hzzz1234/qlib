@@ -237,6 +237,10 @@ _default_config = {
         "value": float("NAN"),
         "index": 0xFFFFFFFF,
     },
+    "pit_record_simplify_type": {
+        "date": "<u4",  # uint32
+        "value": "<f8",  # float64
+    },
     # Default config for MongoDB
     "mongo": {
         "task_url": "mongodb://localhost:27017/",

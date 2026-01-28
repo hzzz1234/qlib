@@ -341,6 +341,18 @@ class FeatureProvider(abc.ABC):
 
 class PITProvider(abc.ABC):
     @abc.abstractmethod
+    def pit_feature_raw(
+        self,
+        instrument,
+        field,
+        freq: str,
+    ) -> pd.Series:
+        """
+        get the raw pit data series
+        """
+        raise NotImplementedError("Subclass of PITProvider must implement `pit_feature_raw` method")
+
+    @abc.abstractmethod
     def period_feature_raw(
         self,
         instrument,
@@ -973,6 +985,37 @@ class LocalFeatureProvider(FeatureProvider, ProviderBackendMixin):
 
 
 class LocalPITProvider(PITProvider):
+
+    def pit_feature_raw(self, instrument, field, freq, period=None):
+        DATA_RECORDS = [
+            ("date", C.pit_record_simplify_type["date"]),
+            ("value", C.pit_record_simplify_type["value"]),
+        ]
+
+        field = str(field).lower()[2:]
+        instrument = code_to_fname(instrument)
+
+        if not field.endswith("_pit"):
+            raise ValueError("pit field must ends with '_pit'")
+
+        data_path = C.dpm.get_data_uri() / "financial" / instrument.lower() / f"{field}.data"
+        if not data_path.exists():
+            # raise FileNotFoundError("No file is found.")
+            get_module_logger("data").warning(f"{instrument} pit {field} no file is found.")
+            return pd.Series()
+
+        datas = np.fromfile(data_path, dtype=DATA_RECORDS)
+        data_indexes = pd.to_datetime(datas['date'], format="%Y%m%d")
+        data_values = datas['value']
+        data_series = pd.Series(data_values, index=data_indexes)
+
+        data_series = data_series.sort_index()
+
+        if period is not None:
+            data_series = data_series.shift(period)
+
+        return data_series
+
     # TODO: Add PIT backend file storage
     # NOTE: This class is not multi-threading-safe!!!!
     def period_feature_raw(self, instrument, field, freq, period=None):
