@@ -301,8 +301,9 @@ class RobustZScoreNorm(Processor):
 class CSZScoreNorm(Processor):
     """Cross Sectional ZScore Normalization"""
 
-    def __init__(self, fields_group=None, method="zscore"):
+    def __init__(self, fields_group=None, method="zscore", exclude_cols=None):
         self.fields_group = fields_group
+        self.exclude_cols = exclude_cols
         if method == "zscore":
             self.zscore_func = zscore
         elif method == "robust":
@@ -320,34 +321,25 @@ class CSZScoreNorm(Processor):
         with pd.option_context("mode.chained_assignment", None):
             for g in self.fields_group:
                 cols = get_group_columns(df, g)
+                if self.exclude_cols is not None:
+                    cols = [col for col in cols if col not in self.exclude_cols]
                 df[cols] = df[cols].groupby("datetime", group_keys=False).apply(self.zscore_func)
         return df
 
 class CSRank(Processor):
     """
-    Cross Sectional Rank Normalization.
-    "Cross Sectional" is often used to describe data operations.
-    The operations across different stocks are often called Cross Sectional Operation.
-
-    For example, CSRank is an operation that grouping the data by each day and rank `across` all the stocks in each day.
-
-    Explanation about 3.46 & 0.5
-
-    .. code-block:: python
-
-        import numpy as np
-        import pandas as pd
-        x = np.random.random(10000)  # for any variable
-        x_rank = pd.Series(x).rank(pct=True)  # if it is converted to rank, it will be a uniform distributed
-
+    Cross Sectional Rank.
     """
 
-    def __init__(self, fields_group=None):
+    def __init__(self, fields_group=None, exclude_cols=None):
         self.fields_group = fields_group
+        self.exclude_cols = exclude_cols
 
     def __call__(self, df):
         # try not modify original dataframe
         cols = get_group_columns(df, self.fields_group)
+        if self.exclude_cols is not None:
+            cols = [col for col in cols if col not in self.exclude_cols]
         t = df[cols].groupby("datetime", group_keys=False).rank(pct=True).astype(C.float_type)
         df[cols] = t
         return df
@@ -375,12 +367,15 @@ class CSRankNorm(Processor):
 
     """
 
-    def __init__(self, fields_group=None):
+    def __init__(self, fields_group=None, exclude_cols=None):
         self.fields_group = fields_group
+        self.exclude_cols = exclude_cols
 
     def __call__(self, df):
         # try not modify original dataframe
         cols = get_group_columns(df, self.fields_group)
+        if self.exclude_cols is not None:
+            cols = [col for col in cols if col not in self.exclude_cols]
         t = df[cols].groupby("datetime", group_keys=False).rank(pct=True)
         t -= 0.5
         t *= 3.46  # NOTE: towards unit std

@@ -729,8 +729,8 @@ class DatasetProvider(abc.ABC):
         from .shared_memory_cache import CSFeatureSharedMemCache
         cs_cache = CSFeatureSharedMemCache()
         try:
-            get_module_logger("data").info("Starting cross-section feature computation")
-            get_module_logger("data").info(f"num cs_levels: {len(reversed_levels) - 1}")
+            # get_module_logger("data").info("Starting cross-section feature computation")
+            # get_module_logger("data").info(f"num cs_levels: {len(reversed_levels) - 1}")
 
             for level in reversed_levels[:-1]:
                 features = level_features[level]

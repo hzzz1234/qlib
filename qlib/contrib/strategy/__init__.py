@@ -8,6 +8,8 @@ from .signal_strategy import (
     EnhancedIndexingStrategy,
 )
 
+from .buy_then_sell_strategy import BuyThenSellTopkDropoutStrategy
+
 from .rule_strategy import (
     TWAPStrategy,
     SBBStrategyBase,
@@ -19,6 +21,7 @@ from .cost_control import SoftTopkStrategy
 
 __all__ = [
     "TopkDropoutStrategy",
+    "BuyThenSellTopkDropoutStrategy",
     "WeightStrategyBase",
     "EnhancedIndexingStrategy",
     "TWAPStrategy",
