@@ -70,6 +70,8 @@ class P(ElemOperator):
         start_time = _calendar[max_start_index]
         end_time = _calendar[min_end_index]
         data_series = data_series.loc[start_time:end_time]
+        # 如果有不存在日期，去掉该日期
+        data_series = data_series[data_series.index.isin(_calendar)]
         data_series.index = pd.RangeIndex(max_start_index, min_end_index+1)
         return data_series
 
