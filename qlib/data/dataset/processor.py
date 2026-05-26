@@ -326,6 +326,58 @@ class CSZScoreNorm(Processor):
                 df[cols] = df[cols].groupby("datetime", group_keys=False).apply(self.zscore_func)
         return df
 
+
+class CSZScoreNormFast(Processor):
+    """Cross Sectional ZScore Normalization (Fast Version)
+
+    使用向量化操作替代 groupby.apply，一次性计算所有特征的统计量，性能显著优于 CSZScoreNorm。
+    """
+
+    def __init__(self, fields_group, method="zscore", exclude_cols=None):
+        self.fields_group = fields_group
+        self.exclude_cols = exclude_cols
+        self.method = method
+        if method not in ("zscore", "robust"):
+            raise NotImplementedError(f"This type of input is not supported")
+
+    def __call__(self, df):
+        """对 DataFrame 进行截面 ZScore 标准化处理，使用向量化操作替代 groupby.apply 以提升性能。
+
+        先收集所有 fields_group 的列，一次性 groupby 计算统计量，避免重复分组。
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            包含多级索引（datetime, instrument）的 DataFrame。
+
+        Returns
+        -------
+        pd.DataFrame
+            经过截面 ZScore 标准化后的 DataFrame。
+        """
+        # 一次性收集所有需要处理的列
+        cols = get_group_columns(df, self.fields_group)
+        if self.exclude_cols is not None:
+            cols = [col for col in cols if col not in self.exclude_cols]
+
+        values = df[cols].astype(C.float_type)
+        g = df.groupby("datetime", sort=False)
+        
+        if self.method == "zscore":
+            mean = g[cols].transform("mean")
+            std = g[cols].transform("std")
+            std = std.mask(std < 1e-8)
+
+            df[cols] = ((values - mean) / std).astype(C.float_type)
+        else:
+            median = g[cols].transform("median")
+            abs_dev = (values - median).abs()
+            mad = abs_dev.groupby(level="datetime", sort=False).transform("median")
+            mad = mad.mask(mad < 1e-8)
+            robust = (values - median) / (mad * 1.4826)
+            df[cols] = robust.clip(-3, 3).astype(C.float_type)
+        return df
+
 class CSRank(Processor):
     """
     Cross Sectional Rank.
@@ -340,8 +392,9 @@ class CSRank(Processor):
         cols = get_group_columns(df, self.fields_group)
         if self.exclude_cols is not None:
             cols = [col for col in cols if col not in self.exclude_cols]
-        t = df[cols].groupby("datetime", group_keys=False).rank(pct=True).astype(C.float_type)
-        df[cols] = t
+        r = df.groupby("datetime")[cols].rank(method="average").astype(C.float_type)
+        cnt = df.groupby("datetime")[cols].transform("count")
+        df[cols] = r / cnt
         return df
 
 class CSRankNorm(Processor):
@@ -372,14 +425,16 @@ class CSRankNorm(Processor):
         self.exclude_cols = exclude_cols
 
     def __call__(self, df):
-        # try not modify original dataframe
         cols = get_group_columns(df, self.fields_group)
         if self.exclude_cols is not None:
-            cols = [col for col in cols if col not in self.exclude_cols]
-        t = df[cols].groupby("datetime", group_keys=False).rank(pct=True)
-        t -= 0.5
-        t *= 3.46  # NOTE: towards unit std
+            cols = [c for c in cols if c not in self.exclude_cols]
+        g = df.groupby("datetime", sort=False)
+        rank = g[cols].rank(method="average")
+        count = g[cols].transform("count")
+        t = rank / count
+        t = ((t - 0.5) * 3.46).astype(C.float_type)
         df[cols] = t
+
         return df
 
 
@@ -433,38 +488,6 @@ class FilterOutlier(Processor):
     def readonly(self):
         return True
 
-
-class ClipOutlier(Processor):
-    """
-    Clip data by limiting values to specified upper/lower bounds.
-    
-    This processor keeps all rows but clips values in the specified fields_group
-    to be within the range [lower, upper]. Values below lower are set to lower,
-    and values above upper are set to upper.
-    
-    Parameters
-    ----------
-    fields_group : str, optional
-        The field group to apply clipping on. If None, applies to all columns.
-    lower : float, optional
-        The lower bound. Values below this will be set to this value.
-        If None, no lower bound clipping is applied.
-    upper : float, optional
-        The upper bound. Values above this will be set to this value.
-        If None, no upper bound clipping is applied.
-    """
-
-    def __init__(self, fields_group=None, lower=None, upper=None):
-        self.fields_group = fields_group
-        self.lower = lower
-        self.upper = upper
-
-    def __call__(self, df):
-        cols = get_group_columns(df, self.fields_group)
-        df[cols] = df[cols].clip(lower=self.lower, upper=self.upper)
-        return df
-
-
 class HashStockFormat(Processor):
     """Process the storage of from df into hasing stock format"""
 
@@ -511,3 +534,76 @@ class TimeRangeFlt(InstProcessor):
         ):
             return df
         return df.head(0)
+
+class CSWinsorization(Processor):
+    """
+    Cross Sectional Winsorization
+    This processor removes entire rows (samples) where any value in the specified
+    fields_group falls outside the given bounds [lower, upper].
+    
+    Parameters
+    ----------
+    fields_group : str, optional
+        The field group to apply filtering on. If None, applies to all columns.
+    lower : float, optional
+        The lower bound. Values below this will cause the row to be filtered out.
+        If None, no lower bound filtering is applied.
+    upper : float, optional
+        The upper bound. Values above this will cause the row to be filtered out.
+        If None, no upper bound filtering is applied.
+    """
+    def __init__(self, fields_group=None, lower=None, upper=None, exclude_cols=None, n=3.0):
+        self.fields_group = fields_group
+        self.lower = lower
+        self.upper = upper
+        self.exclude_cols = exclude_cols
+        self.n = n
+
+    def __call__(self, df):
+        cols = get_group_columns(df, self.fields_group)
+        if self.exclude_cols is not None:
+            cols = [col for col in cols if col not in self.exclude_cols]
+
+        values = df[cols].astype(C.float_type)
+
+        if self.lower is not None and self.upper is not None:
+            df[cols] = values.clip(
+                lower=self.lower,
+                upper=self.upper,
+            )
+        else:
+            # MAD 动态裁剪
+            g = df.groupby(level=0, sort=False)
+
+            median = g[cols].transform("median")
+            
+            abs_dev = (values - median).abs()
+
+            mad = abs_dev.groupby(level=0, sort=False).transform("median")
+
+            mad = mad.mask(mad < 1e-8)
+
+            scale = 1.4826
+
+            dynamic_upper = median + self.n * scale * mad
+            dynamic_lower = median - self.n * scale * mad
+
+            lower = (
+                self.lower
+                if self.lower is not None
+                else dynamic_lower
+            )
+
+            upper = (
+                self.upper
+                if self.upper is not None
+                else dynamic_upper
+            )
+
+            df[cols] = values.clip(
+                lower=lower,
+                upper=upper,
+                axis=0,
+            ).astype(C.float_type)
+
+        return df
