@@ -355,27 +355,25 @@ class CSZScoreNormFast(Processor):
         pd.DataFrame
             经过截面 ZScore 标准化后的 DataFrame。
         """
-        # 一次性收集所有需要处理的列
         cols = get_group_columns(df, self.fields_group)
         if self.exclude_cols is not None:
             cols = [col for col in cols if col not in self.exclude_cols]
+        if not cols:
+            return df
 
-        values = df[cols].astype(C.float_type)
         g = df.groupby("datetime", sort=False)
-        
+
         if self.method == "zscore":
             mean = g[cols].transform("mean")
             std = g[cols].transform("std")
-            std = std.mask(std < 1e-8)
-
-            df[cols] = ((values - mean) / std).astype(C.float_type)
+            std = std.where(std >= 1e-8)
+            df[cols] = ((df[cols] - mean) / std).astype(C.float_type)
         else:
             median = g[cols].transform("median")
-            abs_dev = (values - median).abs()
-            mad = abs_dev.groupby(level="datetime", sort=False).transform("median")
-            mad = mad.mask(mad < 1e-8)
-            robust = (values - median) / (mad * 1.4826)
-            df[cols] = robust.clip(-3, 3).astype(C.float_type)
+            diff = df[cols] - median
+            mad = diff.abs().groupby(level="datetime", sort=False).transform("median")
+            mad = mad.where(mad >= 1e-8)
+            df[cols] = (diff / (mad * 1.4826)).clip(-3, 3).astype(C.float_type)
         return df
 
 class CSRank(Processor):
@@ -536,22 +534,25 @@ class TimeRangeFlt(InstProcessor):
         return df.head(0)
 
 class CSWinsorization(Processor):
-    """
-    Cross Sectional Winsorization
-    This processor removes entire rows (samples) where any value in the specified
-    fields_group falls outside the given bounds [lower, upper].
-    
+    """Cross Sectional Winsorization
+
+    对指定字段进行截面 Winsorization 处理，将超出边界的值裁剪到边界上。
+    支持固定阈值裁剪和基于 MAD 的动态阈值裁剪。
+
     Parameters
     ----------
     fields_group : str, optional
-        The field group to apply filtering on. If None, applies to all columns.
+        要处理的字段组名称，为 None 时作用于所有列。
     lower : float, optional
-        The lower bound. Values below this will cause the row to be filtered out.
-        If None, no lower bound filtering is applied.
+        固定下界，低于此值的元素被裁剪到此值。为 None 时使用动态下界。
     upper : float, optional
-        The upper bound. Values above this will cause the row to be filtered out.
-        If None, no upper bound filtering is applied.
+        固定上界，高于此值的元素被裁剪到此值。为 None 时使用动态上界。
+    exclude_cols : list, optional
+        需要排除的列名列表。
+    n : float, optional
+        MAD 动态裁剪的倍数，默认 3.0。动态边界为 median ± n × 1.4826 × MAD。
     """
+
     def __init__(self, fields_group=None, lower=None, upper=None, exclude_cols=None, n=3.0):
         self.fields_group = fields_group
         self.lower = lower
@@ -560,50 +561,36 @@ class CSWinsorization(Processor):
         self.n = n
 
     def __call__(self, df):
+        """对 DataFrame 执行截面 Winsorization 裁剪。
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            包含多级索引（datetime, instrument）的 DataFrame。
+
+        Returns
+        -------
+        pd.DataFrame
+            裁剪后的 DataFrame。
+        """
         cols = get_group_columns(df, self.fields_group)
         if self.exclude_cols is not None:
             cols = [col for col in cols if col not in self.exclude_cols]
-
-        values = df[cols].astype(C.float_type)
+        if not cols:
+            return df
 
         if self.lower is not None and self.upper is not None:
-            df[cols] = values.clip(
-                lower=self.lower,
-                upper=self.upper,
-            )
-        else:
-            # MAD 动态裁剪
-            g = df.groupby(level=0, sort=False)
+            df[cols] = df[cols].clip(lower=self.lower, upper=self.upper).astype(C.float_type)
+            return df
 
-            median = g[cols].transform("median")
-            
-            abs_dev = (values - median).abs()
+        g = df.groupby(level=0, sort=False)
+        median = g[cols].transform("median")
+        mad = (df[cols] - median).abs().groupby(level=0, sort=False).transform("median")
+        mad = mad.where(mad >= 1e-8)
 
-            mad = abs_dev.groupby(level=0, sort=False).transform("median")
+        margin = self.n * 1.4826 * mad
+        clip_lower = self.lower if self.lower is not None else (median - margin)
+        clip_upper = self.upper if self.upper is not None else (median + margin)
 
-            mad = mad.mask(mad < 1e-8)
-
-            scale = 1.4826
-
-            dynamic_upper = median + self.n * scale * mad
-            dynamic_lower = median - self.n * scale * mad
-
-            lower = (
-                self.lower
-                if self.lower is not None
-                else dynamic_lower
-            )
-
-            upper = (
-                self.upper
-                if self.upper is not None
-                else dynamic_upper
-            )
-
-            df[cols] = values.clip(
-                lower=lower,
-                upper=upper,
-                axis=0,
-            ).astype(C.float_type)
-
+        df[cols] = df[cols].clip(lower=clip_lower, upper=clip_upper).astype(C.float_type)
         return df
