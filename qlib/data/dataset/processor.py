@@ -583,9 +583,9 @@ class CSWinsorization(Processor):
             df[cols] = df[cols].clip(lower=self.lower, upper=self.upper).astype(C.float_type)
             return df
 
-        g = df.groupby(level=0, sort=False)
+        g = df.groupby("datetime", sort=False)
         median = g[cols].transform("median")
-        mad = (df[cols] - median).abs().groupby(level=0, sort=False).transform("median")
+        mad = (df[cols] - median).abs().groupby("datetime", sort=False).transform("median")
         mad = mad.where(mad >= 1e-8)
 
         margin = self.n * 1.4826 * mad
