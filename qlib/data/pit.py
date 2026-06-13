@@ -21,6 +21,7 @@ from .data import Cal
 from .ops import PFeature
 from .base import ExpressionOps
 
+logger = get_module_logger("data")
 class P(ElemOperator):
     # def _load_internal(self, instrument, start_index, end_index, freq):
     #     feature_data = self.feature.load(instrument, start_index, end_index, freq)
@@ -151,6 +152,267 @@ class PreFactor(ExpressionOps):
                 return factor[max_start_index:min_end_index+1]
         
         return pd.Series(np.ones_like(series), index=series.index)
+
+    def get_longest_back_rolling(self):
+        # The period data will collapse as a normal feature. So no extending and looking back
+        return 0
+
+    def get_extended_window_size(self):
+        # The period data will collapse as a normal feature. So no extending and looking back
+        return 0, 0
+
+class FR(ExpressionOps):
+    """Forward Ratio
+    """
+    def __init__(self, feature, feature_dr):
+        self.feature = feature
+        self.feature_dr = feature_dr
+        
+    def __str__(self):
+        return "FR({},{})".format(self.feature, self.feature_dr)
+
+    def _load_internal(self, instrument, start_index, end_index, freq):
+        _calendar = Cal.calendar(freq=freq)
+        data_series = self.feature.load(instrument, start_index, end_index, freq)
+        if data_series.empty:
+            return data_series
+
+        if isinstance(self.feature_dr, PFeature):
+            series_dr = self.feature_dr.load(instrument, start_index, end_index, freq, None)
+            if series_dr.empty:
+                return data_series
+            #
+            # Product of the series_dr
+            factor = series_dr.cumprod()
+            factor = factor / factor.iloc[-1]
+            
+            data_start_index = data_series.index[0]
+            data_end_index = data_series.index[-1]
+
+            data_start_datetime = _calendar[data_start_index]
+
+            if factor.index.min() < data_start_datetime:
+                filtered_index = factor.index[factor.index<data_start_datetime]
+                factor = factor.reindex(filtered_index.union(_calendar[data_start_index:data_end_index+1]))
+                factor.ffill(inplace=True)
+                factor = factor[factor.index>=data_start_datetime]
+                factor.index = pd.RangeIndex(data_start_index, data_end_index+1)
+            else:
+                factor = factor.reindex(_calendar[data_start_index:data_end_index+1])
+                factor.ffill(inplace=True)
+                factor.index = pd.RangeIndex(data_start_index, data_end_index+1)
+
+            if len(factor) != len(data_series):
+                assert "data_series and factor length do not match"
+            data_series = factor * data_series
+        return data_series
+
+    def get_longest_back_rolling(self):
+        # The period data will collapse as a normal feature. So no extending and looking back
+        return 0
+
+    def get_extended_window_size(self):
+        # The period data will collapse as a normal feature. So no extending and looking back
+        return 0, 0
+
+class BR(ExpressionOps):
+    """Backward Ratio
+    """
+    def __init__(self, feature, feature_dr):
+        self.feature = feature
+        self.feature_dr = feature_dr
+        
+    def __str__(self):
+        return "BR({},{})".format(self.feature, self.feature_dr)
+
+    def _load_internal(self, instrument, start_index, end_index, freq):
+        _calendar = Cal.calendar(freq=freq)
+        data_series = self.feature.load(instrument, start_index, end_index, freq)
+        if data_series.empty:
+            return data_series
+
+        if isinstance(self.feature_dr, PFeature):
+            series_dr = self.feature_dr.load(instrument, start_index, end_index, freq, None)
+            if series_dr.empty:
+                return data_series
+            
+            factor = series_dr.cumprod()
+
+            data_start_index = data_series.index[0]
+            data_end_index = data_series.index[-1]
+
+            data_start_datetime = _calendar[data_start_index]
+
+            if factor.index.min() < data_start_datetime:
+                filtered_index = factor.index[factor.index<data_start_datetime]
+                factor = factor.reindex(filtered_index.union(_calendar[data_start_index:data_end_index+1]))
+                factor.ffill(inplace=True)
+                factor = factor[factor.index>=data_start_datetime]
+                factor.index = pd.RangeIndex(data_start_index, data_end_index+1)
+            else:
+                factor = factor.reindex(_calendar[data_start_index:data_end_index+1])
+                factor.ffill(inplace=True)
+                factor.index = pd.RangeIndex(data_start_index, data_end_index+1)
+
+            if len(factor) != len(data_series):
+                assert "data_series and factor length do not match"
+            data_series = factor * data_series
+        return data_series
+
+    def get_longest_back_rolling(self):
+        # The period data will collapse as a normal feature. So no extending and looking back
+        return 0
+
+    def get_extended_window_size(self):
+        # The period data will collapse as a normal feature. So no extending and looking back
+        return 0, 0
+
+
+class FAdjust(ExpressionOps):
+    """forward adjust
+    """
+    def __init__(self, feature, interest, allotPrice, allotNum, stockBonus, stockGift):
+        self.feature = feature
+        self.interest = interest
+        self.allotPrice = allotPrice
+        self.allotNum = allotNum
+        self.stockBonus = stockBonus
+        self.stockGift = stockGift
+        
+    def __str__(self):
+        return "FAdjust({},{},{},{},{},{})".format(self.feature, self.interest, self.allotPrice, self.allotNum, self.stockBonus, self.stockGift)
+
+    def _load_internal(self, instrument, start_index, end_index, freq):
+        _calendar = Cal.calendar(freq=freq)
+        data_series = self.feature.load(instrument, start_index, end_index, freq)
+        if data_series.empty:
+            return data_series
+        # cached feature buffer may be read-only; in-place adjust needs a writable copy
+        data_series = data_series.copy()
+
+        if isinstance(self.interest, PFeature) and isinstance(self.allotPrice, PFeature) and isinstance(self.allotNum, PFeature) and isinstance(self.stockBonus, PFeature) and isinstance(self.stockGift, PFeature):
+            interest = self.interest.load(instrument, start_index, end_index, freq, None)
+            allotPrice = self.allotPrice.load(instrument, start_index, end_index, freq, None)
+            allotNum = self.allotNum.load(instrument, start_index, end_index, freq, None)
+            stockBonus = self.stockBonus.load(instrument, start_index, end_index, freq, None)
+            stockGift = self.stockGift.load(instrument, start_index, end_index, freq, None)
+            
+            if interest.empty or allotPrice.empty or allotNum.empty or stockBonus.empty or stockGift.empty:
+                # logger.warning("FAdjust: interest, allotPrice, allotNum, stockBonus, stockGift is empty")
+                return data_series
+
+            dividend_df = pd.concat([interest, allotPrice, allotNum, stockBonus, stockGift], axis=1)
+            dividend_df.columns = ['interest','allotPrice','allotNum', 'stockBonus', 'stockGift']
+
+            index_list = []
+            if dividend_df.index.min() < _calendar[0]:
+                less_datetime_indexes = dividend_df.index[dividend_df.index<_calendar[0]]
+                
+                start_index = -len(less_datetime_indexes)
+                for i in range(len(less_datetime_indexes)):
+                    index_list.append(start_index)
+                    start_index += 1
+                
+            greater_datetime_indexes = dividend_df.index[dividend_df.index>=_calendar[0]]
+            for greater_datetime_index in greater_datetime_indexes:
+                _,_,s_index,_ = Cal.locate_index(greater_datetime_index,greater_datetime_index,freq)
+                index_list.append(s_index)
+
+            dividend_df['Index'] = index_list
+            dividend_df = dividend_df.set_index('Index')
+
+            for idx, row in dividend_df.iterrows():
+                mask = data_series.index < idx
+                if not mask.any():
+                    continue
+                interest = float(row["interest"])
+                allot_num = float(row["allotNum"])
+                allot_price = float(row["allotPrice"])
+                stock_bonus = float(row["stockBonus"])
+                stock_gift = float(row["stockGift"])
+                factor = 1.0 + allot_num + stock_bonus + stock_gift
+                data_series.loc[mask] = (
+                    data_series.loc[mask] - interest + allot_num * allot_price
+                ) / factor
+            
+        return data_series
+
+    def get_longest_back_rolling(self):
+        # The period data will collapse as a normal feature. So no extending and looking back
+        return 0
+
+    def get_extended_window_size(self):
+        # The period data will collapse as a normal feature. So no extending and looking back
+        return 0, 0
+
+class BAdjust(ExpressionOps):
+    """forward adjust
+    """
+    def __init__(self, feature, interest, allotPrice, allotNum, stockBonus, stockGift):
+        self.feature = feature
+        self.interest = interest
+        self.allotPrice = allotPrice
+        self.allotNum = allotNum
+        self.stockBonus = stockBonus
+        self.stockGift = stockGift
+        
+    def __str__(self):
+        return "BAdjust({},{},{},{},{},{})".format(self.feature, self.interest, self.allotPrice, self.allotNum, self.stockBonus, self.stockGift)
+
+    def _load_internal(self, instrument, start_index, end_index, freq):
+        _calendar = Cal.calendar(freq=freq)
+        data_series = self.feature.load(instrument, start_index, end_index, freq)
+        if data_series.empty:
+            return data_series
+        # cached feature buffer may be read-only; in-place adjust needs a writable copy
+        data_series = data_series.copy()
+
+        if isinstance(self.interest, PFeature) and isinstance(self.allotPrice, PFeature) and isinstance(self.allotNum, PFeature) and isinstance(self.stockBonus, PFeature) and isinstance(self.stockGift, PFeature):
+            interest = self.interest.load(instrument, start_index, end_index, freq, None)
+            allotPrice = self.allotPrice.load(instrument, start_index, end_index, freq, None)
+            allotNum = self.allotNum.load(instrument, start_index, end_index, freq, None)
+            stockBonus = self.stockBonus.load(instrument, start_index, end_index, freq, None)
+            stockGift = self.stockGift.load(instrument, start_index, end_index, freq, None)
+            
+            if interest.empty or allotPrice.empty or allotNum.empty or stockBonus.empty or stockGift.empty:
+                # logger.warning("FAdjust: interest, allotPrice, allotNum, stockBonus, stockGift is empty")
+                return data_series
+
+            dividend_df = pd.concat([interest, allotPrice, allotNum, stockBonus, stockGift], axis=1)
+            dividend_df.columns = ['interest','allotPrice','allotNum', 'stockBonus', 'stockGift']
+
+            index_list = []
+            if dividend_df.index.min() < _calendar[0]:
+                less_datetime_indexes = dividend_df.index[dividend_df.index<_calendar[0]]
+                
+                start_index = -len(less_datetime_indexes)
+                for i in range(len(less_datetime_indexes)):
+                    index_list.append(start_index)
+                    start_index += 1
+                
+            greater_datetime_indexes = dividend_df.index[dividend_df.index>=_calendar[0]]
+            for greater_datetime_index in greater_datetime_indexes:
+                _,_,s_index,_ = Cal.locate_index(greater_datetime_index,greater_datetime_index,freq)
+                index_list.append(s_index)
+
+            dividend_df['Index'] = index_list
+            dividend_df = dividend_df.set_index('Index')
+
+            for idx, row in dividend_df[::-1].iterrows():
+                mask = data_series.index >= idx
+                if not mask.any():
+                    continue
+                interest = float(row["interest"])
+                allot_num = float(row["allotNum"])
+                allot_price = float(row["allotPrice"])
+                stock_bonus = float(row["stockBonus"])
+                stock_gift = float(row["stockGift"])
+                bias = interest - allot_num * allot_price
+                data_series.loc[mask] = (
+                    data_series.loc[mask] * (1 + stock_gift + stock_bonus + allot_num) + bias
+                )
+            
+        return data_series
 
     def get_longest_back_rolling(self):
         # The period data will collapse as a normal feature. So no extending and looking back
