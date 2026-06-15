@@ -164,9 +164,10 @@ class PreFactor(ExpressionOps):
 class FR(ExpressionOps):
     """Forward Ratio
     """
-    def __init__(self, feature, feature_dr):
+    def __init__(self, feature, feature_dr, is_vol = 0):
         self.feature = feature
         self.feature_dr = feature_dr
+        self.is_vol = is_vol
         
     def __str__(self):
         return "FR({},{})".format(self.feature, self.feature_dr)
@@ -204,7 +205,11 @@ class FR(ExpressionOps):
 
             if len(factor) != len(data_series):
                 assert "data_series and factor length do not match"
-            data_series = factor * data_series
+            
+            if self.is_vol == 1:
+                data_series = data_series/factor
+            else:
+                data_series = factor * data_series
         return data_series
 
     def get_longest_back_rolling(self):
@@ -218,9 +223,10 @@ class FR(ExpressionOps):
 class BR(ExpressionOps):
     """Backward Ratio
     """
-    def __init__(self, feature, feature_dr):
+    def __init__(self, feature, feature_dr, is_vol = 0):
         self.feature = feature
         self.feature_dr = feature_dr
+        self.is_vol = is_vol
         
     def __str__(self):
         return "BR({},{})".format(self.feature, self.feature_dr)
@@ -256,7 +262,11 @@ class BR(ExpressionOps):
 
             if len(factor) != len(data_series):
                 assert "data_series and factor length do not match"
-            data_series = factor * data_series
+            
+            if self.is_vol == 1:
+                data_series = data_series/factor
+            else:
+                data_series = factor * data_series
         return data_series
 
     def get_longest_back_rolling(self):
@@ -271,16 +281,17 @@ class BR(ExpressionOps):
 class FAdjust(ExpressionOps):
     """forward adjust
     """
-    def __init__(self, feature, interest, allotPrice, allotNum, stockBonus, stockGift):
+    def __init__(self, feature, interest, allotPrice, allotNum, stockBonus, stockGift, is_vol = 0):
         self.feature = feature
         self.interest = interest
         self.allotPrice = allotPrice
         self.allotNum = allotNum
         self.stockBonus = stockBonus
         self.stockGift = stockGift
+        self.is_vol = is_vol
         
     def __str__(self):
-        return "FAdjust({},{},{},{},{},{})".format(self.feature, self.interest, self.allotPrice, self.allotNum, self.stockBonus, self.stockGift)
+        return "FAdjust({},{},{},{},{},{},{})".format(self.feature, self.interest, self.allotPrice, self.allotNum, self.stockBonus, self.stockGift, self.is_vol)
 
     def _load_internal(self, instrument, start_index, end_index, freq):
         _calendar = Cal.calendar(freq=freq)
@@ -331,9 +342,12 @@ class FAdjust(ExpressionOps):
                 stock_bonus = float(row["stockBonus"])
                 stock_gift = float(row["stockGift"])
                 factor = 1.0 + allot_num + stock_bonus + stock_gift
-                data_series.loc[mask] = (
-                    data_series.loc[mask] - interest + allot_num * allot_price
-                ) / factor
+                if self.is_vol == 0:
+                    data_series.loc[mask] = (
+                        data_series.loc[mask] - interest + allot_num * allot_price
+                    ) / factor
+                else:
+                    data_series.loc[mask] = factor * data_series.loc[mask]
             
         return data_series
 
@@ -348,16 +362,17 @@ class FAdjust(ExpressionOps):
 class BAdjust(ExpressionOps):
     """forward adjust
     """
-    def __init__(self, feature, interest, allotPrice, allotNum, stockBonus, stockGift):
+    def __init__(self, feature, interest, allotPrice, allotNum, stockBonus, stockGift, is_vol = 0):
         self.feature = feature
         self.interest = interest
         self.allotPrice = allotPrice
         self.allotNum = allotNum
         self.stockBonus = stockBonus
         self.stockGift = stockGift
+        self.is_vol = is_vol
         
     def __str__(self):
-        return "BAdjust({},{},{},{},{},{})".format(self.feature, self.interest, self.allotPrice, self.allotNum, self.stockBonus, self.stockGift)
+        return "BAdjust({},{},{},{},{},{},{})".format(self.feature, self.interest, self.allotPrice, self.allotNum, self.stockBonus, self.stockGift, self.is_vol)
 
     def _load_internal(self, instrument, start_index, end_index, freq):
         _calendar = Cal.calendar(freq=freq)
@@ -408,9 +423,13 @@ class BAdjust(ExpressionOps):
                 stock_bonus = float(row["stockBonus"])
                 stock_gift = float(row["stockGift"])
                 bias = interest - allot_num * allot_price
-                data_series.loc[mask] = (
-                    data_series.loc[mask] * (1 + stock_gift + stock_bonus + allot_num) + bias
-                )
+                factor = 1.0 + allot_num + stock_bonus + stock_gift
+                if self.is_vol == 0:
+                    data_series.loc[mask] = (
+                        data_series.loc[mask] * factor + bias
+                    )
+                else:
+                    data_series.loc[mask] = data_series.loc[mask] / factor
             
         return data_series
 
